@@ -79,20 +79,31 @@ async function registerMini(t, title = 'Flow Demo') {
   return { workspace, ctx, projectId: result.projectId };
 }
 
-/** 推进到指定下标(逐段常规推进;遇门禁自动 present+approve)。 */
+/** 推进到指定下标(逐段常规推进;遇门禁自动 present(如未呈递)+approve)。 */
 async function advanceTo(t, ctx, workspace, projectId, targetIndex) {
   const advance = getTool(ctx, 'project_advance');
   const gateTool = getTool(ctx, 'project_gate');
   const context = sessionContext(workspace);
   for (let index = 0; index < targetIndex; index++) {
     const state = await getTool(ctx, 'project_status').execute({ projectId }, context);
-    if (state.project.gateStatus === 'pending') {
-      await gateTool.execute({
-        projectId,
-        stageId: state.project.currentStage.id,
-        action: 'decide',
-        decision: { verdict: 'approve' },
-      }, context);
+    if (state.project.currentStage?.type === 'gate') {
+      if (state.project.gateStatus == null) {
+        await gateTool.execute({
+          projectId,
+          stageId: state.project.currentStage.id,
+          action: 'present',
+          package: { summary: '测试自动呈递' },
+        }, context);
+      }
+      const fresh = await getTool(ctx, 'project_status').execute({ projectId }, context);
+      if (fresh.project.gateStatus === 'pending') {
+        await gateTool.execute({
+          projectId,
+          stageId: fresh.project.currentStage.id,
+          action: 'decide',
+          decision: { verdict: 'approve' },
+        }, context);
+      }
     }
     await advance.execute({ projectId }, context);
   }
@@ -457,8 +468,16 @@ test('project_advance:最后阶段无 appendStages = 结项(delivered);appendSta
   assert.equal(registry.iteration, 2);
   assert.ok(existsSync(result.journalPath));
 
-  // 走到追加流程的尽头:fix → final-gate(末阶段)→ 无 appendStages 的推进 = 结项
+  // 走到追加流程的尽头:fix → final-gate(末阶段);门禁未呈递不可推进(2026-08-29 收紧),
+  // 必须 present → decide approve → advance 才结项
   await getTool(ctx, 'project_advance').execute({ projectId }, context);
+  await assert.rejects(
+    () => getTool(ctx, 'project_advance').execute({ projectId }, context),
+    /尚未呈递/,
+    'gate 阶段未呈递(gateStatus=null)拒绝推进',
+  );
+  await getTool(ctx, 'project_gate').execute({ projectId, stageId: 'final-gate', action: 'present', package: { summary: '终审呈递' } }, context);
+  await getTool(ctx, 'project_gate').execute({ projectId, stageId: 'final-gate', action: 'decide', decision: { verdict: 'approve' } }, context);
   const done = await getTool(ctx, 'project_advance').execute({ projectId }, context);
   assert.equal(done.delivered, true, '最后阶段无 appendStages 的推进 = 结项');
   assert.equal(done.state, 'delivered');

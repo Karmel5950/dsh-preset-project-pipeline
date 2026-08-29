@@ -429,6 +429,11 @@ function makeApi({ cfg, presetDir, logger }) {
       if (registry.gateStatus === 'pending') {
         throw new Error(`${name}/project_advance: 门禁 ${cur.id} 待裁决,先用 project_gate decide 裁决后再推进`);
       }
+      if (registry.gateStatus === null || registry.gateStatus === undefined) {
+        // 2026-08-29 实测收紧(P2 project-hub 运行中协调者未 present 直接 advance
+        // 穿过门禁,intake 还幻觉转述"已呈递"):未呈递的门禁不许推进——停摆语义靠它保证。
+        throw new Error(`${name}/project_advance: 门禁 ${cur.id} 尚未呈递,先 project_gate(action=present) 呈递门禁包并等用户裁决,不允许直接推进`);
+      }
       if (registry.gateStatus === 'reject') {
         throw new Error(`${name}/project_advance: 门禁 ${cur.id} 已被否决(项目终态),不能推进`);
       }
@@ -898,7 +903,7 @@ const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
 
 ### 工具速查(登记簿 5 + 库 4)
 1. project_register:登记新项目。title+requirement 必填;flowTemplate 选模板(默认 standard-flow)或给 flowStages 现场定制;可带 budgetEstimate。返回项目 id 与流程概要。
-2. project_advance:推进到下一阶段。门禁 pending 会拒绝;approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1);在最后阶段不给 appendStages = 结项(state→delivered,此后不可再推进)。常规推进自动写 journal;结项不写 journal、返回 delivered:true。
+2. project_advance:推进到下一阶段。门禁 pending 会拒绝;**门禁未呈递(gateStatus=null)也会拒绝**——必须先 present 呈递并等用户裁决(2026-08-29 实测收紧:协调者曾未呈递直接穿过门禁);approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1);在最后阶段不给 appendStages = 结项(state→delivered,此后不可再推进)。常规推进自动写 journal;结项不写 journal、返回 delivered:true。
 3. project_gate:门禁两步。present 把摘要/材料/建议写成门禁包并置 pending;decide 记录用户裁决(approve/revise/reject),revise 必给 reviseTo(流程中已有的 work 阶段 id),reject 使项目终态。
 4. project_budget:get 查账(含 totals);set-estimate / set-cap 设估算与上限;commit 逐阶段上报消耗(stageId/role/usage,source 默认 self-report)。
 5. project_status:不带 projectId 列出工作区全部项目;带 projectId 看单项目详情(当前阶段/门禁态/预算聚合/SUMMARY 是否存在)。
