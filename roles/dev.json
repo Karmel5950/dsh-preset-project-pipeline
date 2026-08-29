@@ -13,7 +13,8 @@
       "todo_write",
       "subagent",
       "send_message",
-      "project_budget"
+      "project_budget",
+      "project_block"
     ]
   },
   "workspace": "project-root"

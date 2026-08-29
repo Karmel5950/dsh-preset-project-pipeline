@@ -111,12 +111,13 @@ async function advanceTo(t, ctx, workspace, projectId, targetIndex) {
 
 // ── 插件元数据与挂载 ────────────────────────────────────────────────────────
 
-test('插件元数据:5 个工具 + 1 条手册提示段(注册常驻,不接线 ctx.effect)', async () => {
+test('插件元数据:6 个工具 + 1 条手册提示段(注册常驻,不接线 ctx.effect)', async () => {
   const ctx = await mountPlugin();
   assert.equal(name, 'project-pipeline-registry');
   assert.deepEqual(inject, ['tools', 'systemPrompt']);
   assert.deepEqual(ctx.tools.items.map((item) => item.name).sort(), [
     'project_advance',
+    'project_block',
     'project_budget',
     'project_gate',
     'project_register',
@@ -126,7 +127,7 @@ test('插件元数据:5 个工具 + 1 条手册提示段(注册常驻,不接线 
   const section = ctx.systemPrompt.items[0];
   assert.equal(section.name, 'project-pipeline/manual');
   assert.equal(section.order, 140);
-  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement']) {
+  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律']) {
     assert.ok(section.text.includes(word), `手册段应包含 ${word}`);
   }
 });
@@ -813,4 +814,118 @@ test('lib:registryPaths 布局与 projectId 卫兵;BUDGET_SOURCES/STAGE_TYPES �
   assert.throws(() => registryPaths(root, 'a/b'), /projectId/);
   assert.deepEqual(STAGE_TYPES, ['work', 'gate', 'summary', 'internalize']);
   assert.deepEqual(BUDGET_SOURCES, ['self-report', 'runtime-events', 'billing-plugin']);
+});
+
+// ── project_block(卡点通道,2026-08-30 流程补丁)──────────────────────────
+
+test('project_block:report 登记卡点 + REGISTRY.blockers + journal 留痕', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'standard-flow', MINI_STAGES);
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  const reg = await getTool(ctx, 'project_register').execute({ title: 'block demo', requirement: 'r' }, context);
+  const projectId = reg.projectId;
+
+  const out = await getTool(ctx, 'project_block').execute({
+    projectId,
+    action: 'report',
+    category: 'acceptance-capability',
+    reason: '视觉验收需要浏览器与视觉,角色沙箱均不具备',
+    raisedBy: 'tester',
+    options: ['用户侧浏览器验收(需设为 blocking)', '接入视觉模型管道'],
+    recommendation: '用户侧验收',
+  }, context);
+  assert.equal(out.blocker.id, 'b1');
+  assert.equal(out.blocker.status, 'open');
+  assert.equal(out.blocker.stageIndex, 0);
+  assert.equal(out.openBlockers, 1);
+
+  const registry = await readJson(join(workspace, projectId, '.dsh-project', 'REGISTRY.json'));
+  assert.equal(registry.blockers.length, 1);
+  assert.equal(registry.blockers[0].category, 'acceptance-capability');
+  assert.deepEqual(registry.blockers[0].options, ['用户侧浏览器验收(需设为 blocking)', '接入视觉模型管道']);
+
+  const journal = await readFile(join(workspace, projectId, '.dsh-project', 'journal', '01-do.md'), 'utf8');
+  assert.ok(journal.includes('卡点上报:b1'), 'journal 应含卡点上报留痕');
+  assert.ok(journal.includes('acceptance-capability') || journal.includes('验收可行性'), '留痕应含分类');
+
+  // status 两级都暴露 openBlockers
+  const detail = await getTool(ctx, 'project_status').execute({ projectId }, context);
+  assert.equal(detail.project.openBlockers, 1);
+  const list = await getTool(ctx, 'project_status').execute({}, context);
+  assert.equal(list.projects.find((p) => p.id === projectId).openBlockers, 1);
+});
+
+test('project_block:open 卡点期间 advance 拒绝;resolve 后恢复推进', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'standard-flow', MINI_STAGES);
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  const reg = await getTool(ctx, 'project_register').execute({ title: 'block gate', requirement: 'r' }, context);
+  const projectId = reg.projectId;
+  const block = getTool(ctx, 'project_block');
+  const advance = getTool(ctx, 'project_advance');
+
+  await block.execute({ projectId, action: 'report', category: 'test-env', reason: '无真实上游可验证' }, context);
+  await assert.rejects(() => advance.execute({ projectId }, context), /未解决卡点.*测试可行性/);
+
+  await assert.rejects(
+    () => block.execute({ projectId, action: 'resolve', blockerId: 'b1' }, context),
+    /resolution/,
+  );
+  await assert.rejects(
+    () => block.execute({ projectId, action: 'resolve', blockerId: 'b9', resolution: 'x' }, context),
+    /不存在/,
+  );
+  const resolved = await block.execute({
+    projectId,
+    action: 'resolve',
+    blockerId: 'b1',
+    resolution: '用户裁决:改用 stub 上游单测,真实上游验证留给部署后',
+  }, context);
+  assert.equal(resolved.blocker.status, 'resolved');
+  assert.equal(resolved.openBlockers, 0);
+  await assert.rejects(
+    () => block.execute({ projectId, action: 'resolve', blockerId: 'b1', resolution: '重复' }, context),
+    /不能重复 resolve/,
+  );
+
+  const out = await advance.execute({ projectId }, context);
+  assert.equal(out.stageIndex, 1);
+  const list = await getTool(ctx, 'project_status').execute({}, context);
+  assert.equal(list.projects.find((p) => p.id === projectId).openBlockers, 0);
+});
+
+test('project_block:report 校验(category 白名单/未知键/必填)+ list + 老登记簿兼容', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'standard-flow', MINI_STAGES);
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  const reg = await getTool(ctx, 'project_register').execute({ title: 'block validate', requirement: 'r' }, context);
+  const projectId = reg.projectId;
+  const block = getTool(ctx, 'project_block');
+
+  await assert.rejects(() => block.execute({ projectId, action: 'report', category: 'wat', reason: 'x' }, context), /category/);
+  await assert.rejects(() => block.execute({ projectId, action: 'report' }, context), /reason/);
+  await assert.rejects(() => block.execute({ projectId, action: 'report', reason: 'x', wat: 1 }, context), /未知键/);
+  await assert.rejects(() => block.execute({ projectId, action: 'wat' }, context), /report\/resolve\/list/);
+
+  const empty = await block.execute({ projectId, action: 'list' }, context);
+  assert.deepEqual(empty.blockers, []);
+  assert.equal(empty.openBlockers, 0);
+
+  // 老登记簿(无 blockers 字段)兼容:advance 正常、report 后卡住
+  const registryFile = join(workspace, projectId, '.dsh-project', 'REGISTRY.json');
+  const old = await readJson(registryFile);
+  delete old.blockers;
+  await writeJson(registryFile, old);
+  const out = await getTool(ctx, 'project_advance').execute({ projectId }, context);
+  assert.equal(out.stageIndex, 1);
+  await block.execute({ projectId, action: 'report', category: 'deploy-permission', reason: '沙箱写不进目标路径' }, context);
+  await assert.rejects(() => getTool(ctx, 'project_advance').execute({ projectId }, context), /未解决卡点.*部署可行性/);
+
+  // render 返回块数组(契约:contentHasImage 防线)
+  const tool = getTool(ctx, 'project_block');
+  const rendered = tool.output.render({ projectId, action: 'list' }, { blockers: [], openBlockers: 0 });
+  assert.ok(Array.isArray(rendered) && rendered[0].type === 'text');
 });

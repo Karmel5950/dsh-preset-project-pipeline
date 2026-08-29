@@ -36,6 +36,28 @@ import {
 
 export const name = 'project-pipeline-registry';
 
+/** 卡点分类(= 五维可行性维度 + other;project_block report 用)。 */
+export const BLOCKER_CATEGORIES = [
+  'design-info',            // 设计可行性:信息不完备(需求/参照/边界缺失)
+  'dev-complexity',         // 开发可行性:复杂度/体量/依赖超出角色能力
+  'test-env',               // 测试可行性:验证所需环境/数据/凭据不具备
+  'deploy-permission',      // 部署可行性:目标路径权限/沙箱边界/凭据/重启窗口
+  'acceptance-capability',  // 验收可行性:验收手段与验收者能力不匹配(如视觉验收无视觉)
+  'other',
+];
+
+/** 卡点分类的中文一说(渲染与手册用)。 */
+function blockerCategoryLabel(category) {
+  return {
+    'design-info': '设计可行性(信息不完备)',
+    'dev-complexity': '开发可行性(复杂度超限)',
+    'test-env': '测试可行性(环境/数据不具备)',
+    'deploy-permission': '部署可行性(权限/沙箱限制)',
+    'acceptance-capability': '验收可行性(验收手段缺失)',
+    other: '其他',
+  }[category] ?? category;
+}
+
 /** 纯消费宿主服务;不 provide,组合行无需 isolate group。 */
 export const inject = ['tools', 'systemPrompt'];
 
@@ -119,6 +141,30 @@ function assertRegistry(value, file) {
 function assertActive(registry, projectId) {
   if (registry.state !== 'active') {
     throw new Error(`${name}: 项目 ${projectId} 已终态(${registry.state}),拒绝继续变更`);
+  }
+}
+
+/** 未解决卡点清单(老登记簿无 blockers 字段视作空)。 */
+function openBlockerList(registry) {
+  return Array.isArray(registry?.blockers) ? registry.blockers.filter((b) => b?.status === 'open') : [];
+}
+
+/** 卡点 journal 留痕(当前阶段 journal 文件追加;缺失则创建)。 */
+async function appendBlockerJournal(paths, registry, text) {
+  let stageId = null;
+  try {
+    const flow = await readJson(paths.flowFile);
+    const stages = Array.isArray(flow.stages) ? flow.stages : [];
+    stageId = stages[registry.stageIndex]?.id ?? null;
+  } catch {
+    stageId = null;
+  }
+  if (stageId === null) return;
+  const journalPath = join(paths.journalDir, gateFileName(registry.stageIndex, stageId));
+  if (existsSync(journalPath)) await appendFile(journalPath, `\n---\n\n${text}\n`, 'utf8');
+  else {
+    await mkdir(paths.journalDir, { recursive: true });
+    await writeFile(journalPath, `${text}\n`, 'utf8');
   }
 }
 
@@ -337,6 +383,7 @@ function makeApi({ cfg, presetDir, logger }) {
       iteration: 1,
       stageIndex: 0,
       gateStatus: null,
+      blockers: [],
       state: 'active',
     };
     const flow = { schemaVersion: 1, id: flowId, version: flowVersion, stages, source: flowSource, revision: 1 };
@@ -393,6 +440,12 @@ function makeApi({ cfg, presetDir, logger }) {
     const registry = await readJson(paths.registryFile);
     assertRegistry(registry, paths.registryFile);
     assertActive(registry, projectId);
+    // 卡点纪律(2026-08-30 流程补丁):有未解决卡点的项目不许推进——
+    // 卡点必须先呈递用户裁决、project_block resolve 后流程才能继续。
+    const openBlockers = openBlockerList(registry);
+    if (openBlockers.length > 0) {
+      throw new Error(`${name}/project_advance: 项目存在未解决卡点,先呈递用户裁决并 project_block resolve 后才能推进:${openBlockers.map((b) => `${b.id}(${blockerCategoryLabel(b.category)})`).join('、')}`);
+    }
     const flow = await readJson(paths.flowFile);
     const stages = Array.isArray(flow.stages) ? flow.stages : [];
     const curIndex = registry.stageIndex;
@@ -684,6 +737,7 @@ function makeApi({ cfg, presetDir, logger }) {
             totals: budgetTotals(budgetBook),
           },
           summaryExists: existsSync(paths.summaryFile),
+          openBlockers: openBlockerList(registry).length,
         },
       };
     }
@@ -707,6 +761,7 @@ function makeApi({ cfg, presetDir, logger }) {
           iteration: registry.iteration ?? 1,
           stageIndex: registry.stageIndex ?? 0,
           updatedAt: registry.updatedAt ?? '',
+          openBlockers: openBlockerList(registry).length,
         });
       } catch (error) {
         logger.warn?.(`${name}/project_status: 跳过损坏的登记簿 ${file}:${error?.message ?? error}`);
@@ -715,7 +770,105 @@ function makeApi({ cfg, presetDir, logger }) {
     return { projects };
   }
 
-  return { register, advance, gate, budget, status };
+  // 6. project_block ────────────────────────────────────────────────────────
+  // 卡点通道(2026-08-30 流程补丁):遇卡点优先上报,禁止降级处理。
+  // report 登记卡点(status=open,卡住推进)+ journal 留痕;resolve 记录用户裁决
+  // 结论并解卡;list 查看全部卡点。协调者收到 open 卡点必须立即呈递用户,
+  // 不得代替裁决,也不得以缩范围/替代手段静默消化。
+  async function block(args, context) {
+    const workspaceDir = sessionWorkspace(context);
+    const projectId = safeProjectId(args?.projectId);
+    const paths = pathsFor(workspaceDir, projectId);
+    const registry = await readJson(paths.registryFile);
+    assertRegistry(registry, paths.registryFile);
+    assertActive(registry, projectId);
+    if (!Array.isArray(registry.blockers)) registry.blockers = [];
+    const action = args?.action;
+
+    if (action === 'report') {
+      for (const key of Object.keys(args)) {
+        if (!['projectId', 'action', 'category', 'reason', 'raisedBy', 'options', 'recommendation'].includes(key)) {
+          throw new Error(`${name}/project_block: report 含未知键 "${key}"(允许 projectId/action/category/reason/raisedBy/options/recommendation)`);
+        }
+      }
+      if (!nonEmptyString(args.reason)) throw new Error(`${name}/project_block: report 需要 reason(非空字符串):卡点是什么、为什么无法在当前能力/环境下解决`);
+      const category = args.category ?? 'other';
+      if (!BLOCKER_CATEGORIES.includes(category)) {
+        throw new Error(`${name}/project_block: category 必须是 ${BLOCKER_CATEGORIES.join('/')},得到 ${JSON.stringify(category)}`);
+      }
+      const id = `b${registry.blockers.length + 1}`;
+      const now = new Date().toISOString();
+      const entry = {
+        id,
+        category,
+        reason: args.reason,
+        raisedAt: now,
+        stageIndex: registry.stageIndex,
+        status: 'open',
+      };
+      if (nonEmptyString(args.raisedBy)) entry.raisedBy = args.raisedBy;
+      if (Array.isArray(args.options)) {
+        if (args.options.some((x) => typeof x !== 'string' || x.length === 0)) {
+          throw new Error(`${name}/project_block: options 必须是非空字符串数组(候选处理方案,供用户裁决)`);
+        }
+        entry.options = args.options;
+      }
+      if (nonEmptyString(args.recommendation)) entry.recommendation = args.recommendation;
+      registry.blockers.push(entry);
+      registry.updatedAt = now;
+      await writeJson(paths.registryFile, registry);
+      await appendBlockerJournal(paths, registry, [
+        `## ⚠ 卡点上报:${id}(${blockerCategoryLabel(category)})`,
+        '',
+        `- 上报时间:${now}`,
+        ...(entry.raisedBy ? [`- 上报方:${entry.raisedBy}`] : []),
+        `- 原因:${entry.reason}`,
+        ...(entry.options ? [`- 候选方案:${entry.options.join(' / ')}`] : []),
+        ...(entry.recommendation ? [`- 建议:${entry.recommendation}`] : []),
+        '',
+        '> 卡点未解决前 project_advance 拒绝推进;协调者须立即呈递用户裁决。',
+      ].join('\n'));
+      return { blocker: entry, openBlockers: openBlockerList(registry).length };
+    }
+
+    if (action === 'resolve') {
+      for (const key of Object.keys(args)) {
+        if (!['projectId', 'action', 'blockerId', 'resolution', 'raisedBy'].includes(key)) {
+          throw new Error(`${name}/project_block: resolve 含未知键 "${key}"(允许 projectId/action/blockerId/resolution/raisedBy)`);
+        }
+      }
+      if (!nonEmptyString(args.blockerId)) throw new Error(`${name}/project_block: resolve 需要 blockerId`);
+      if (!nonEmptyString(args.resolution)) throw new Error(`${name}/project_block: resolve 需要 resolution(非空字符串):用户裁决结论与后续安排)`);
+      const target = registry.blockers.find((b) => b.id === args.blockerId);
+      if (!target) {
+        throw new Error(`${name}/project_block: 卡点 ${args.blockerId} 不存在(现有:${registry.blockers.map((b) => b.id).join(', ') || '无'})`);
+      }
+      if (target.status !== 'open') {
+        throw new Error(`${name}/project_block: 卡点 ${args.blockerId} 已是 ${target.status},不能重复 resolve`);
+      }
+      const now = new Date().toISOString();
+      target.status = 'resolved';
+      target.resolution = args.resolution;
+      target.resolvedAt = now;
+      registry.updatedAt = now;
+      await writeJson(paths.registryFile, registry);
+      await appendBlockerJournal(paths, registry, [
+        `## 卡点解决:${target.id}(${blockerCategoryLabel(target.category)})`,
+        '',
+        `- 解决时间:${now}`,
+        `- 裁决结论:${args.resolution}`,
+      ].join('\n'));
+      return { blocker: target, openBlockers: openBlockerList(registry).length };
+    }
+
+    if (action === 'list') {
+      return { blockers: registry.blockers, openBlockers: openBlockerList(registry).length };
+    }
+
+    throw new Error(`${name}/project_block: action 必须是 report/resolve/list,得到 ${JSON.stringify(args?.action ?? null)}`);
+  }
+
+  return { register, advance, gate, budget, status, block };
 }
 
 // ── 工具 schema(纯 JSON Schema;输出值会被运行时按 schema 严格校验)─────────
@@ -805,8 +958,9 @@ function projectSummarySchema() {
       iteration: { type: 'integer' },
       stageIndex: { type: 'integer' },
       updatedAt: { type: 'string' },
+      openBlockers: { type: 'integer' },
     },
-    required: ['id', 'title', 'state', 'iteration', 'stageIndex', 'updatedAt'],
+    required: ['id', 'title', 'state', 'iteration', 'stageIndex', 'updatedAt', 'openBlockers'],
   };
 }
 
@@ -826,8 +980,9 @@ function projectDetailSchema() {
       currentStage: { oneOf: [stageBriefSchema(), { type: 'null' }] },
       budget: budgetSnapshotSchema(),
       summaryExists: { type: 'boolean' },
+      openBlockers: { type: 'integer' },
     },
-    required: ['projectId', 'title', 'state', 'iteration', 'stageIndex', 'gateStatus', 'updatedAt', 'flowRef', 'currentStage', 'budget', 'summaryExists'],
+    required: ['projectId', 'title', 'state', 'iteration', 'stageIndex', 'gateStatus', 'updatedAt', 'flowRef', 'currentStage', 'budget', 'summaryExists', 'openBlockers'],
   };
 }
 
@@ -888,6 +1043,37 @@ const STATUS_OUTPUT_SCHEMA = {
   },
 };
 
+function blockerSchema() {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      id: { type: 'string' },
+      category: { type: 'string', enum: [...BLOCKER_CATEGORIES] },
+      reason: { type: 'string' },
+      raisedAt: { type: 'string' },
+      stageIndex: { type: 'integer' },
+      status: { type: 'string', enum: ['open', 'resolved'] },
+      raisedBy: { type: 'string' },
+      options: { type: 'array', items: { type: 'string' } },
+      recommendation: { type: 'string' },
+      resolution: { type: 'string' },
+      resolvedAt: { type: 'string' },
+    },
+    required: ['id', 'category', 'reason', 'raisedAt', 'stageIndex', 'status'],
+  };
+}
+
+const BLOCK_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    blocker: blockerSchema(),
+    blockers: { type: 'array', items: blockerSchema() },
+    openBlockers: { type: 'integer' },
+  },
+};
+
 // ── 共享手册提示段(SPEC §9;中文,提纲写全)────────────────────────────────
 
 const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
@@ -901,14 +1087,30 @@ const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
 - gates/NN-<stageId>.md:门禁包与裁决记录;feedback/NN.md:验收反馈登记
 角色库与流程库在 <workspace>/.dsh-library/(roles|flows),workspace 同名条目覆盖 preset 自带。
 
-### 工具速查(登记簿 5 + 库 4)
+### 工具速查(登记簿 6 + 库 4)
 1. project_register:登记新项目。title+requirement 必填;flowTemplate 选模板(默认 standard-flow)或给 flowStages 现场定制;可带 budgetEstimate。返回项目 id 与流程概要。
-2. project_advance:推进到下一阶段。门禁 pending 会拒绝;**门禁未呈递(gateStatus=null)也会拒绝**——必须先 present 呈递并等用户裁决(2026-08-29 实测收紧:协调者曾未呈递直接穿过门禁);approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1);在最后阶段不给 appendStages = 结项(state→delivered,此后不可再推进)。常规推进自动写 journal;结项不写 journal、返回 delivered:true。
+2. project_advance:推进到下一阶段。**存在未解决卡点(project_block)会拒绝**;门禁 pending 会拒绝;**门禁未呈递(gateStatus=null)也会拒绝**——必须先 present 呈递并等用户裁决(2026-08-29 实测收紧:协调者曾未呈递直接穿过门禁);approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1);在最后阶段不给 appendStages = 结项(state→delivered,此后不可再推进)。常规推进自动写 journal;结项不写 journal、返回 delivered:true。
 3. project_gate:门禁两步。present 把摘要/材料/建议写成门禁包并置 pending;decide 记录用户裁决(approve/revise/reject),revise 必给 reviseTo(流程中已有的 work 阶段 id),reject 使项目终态。
 4. project_budget:get 查账(含 totals);set-estimate / set-cap 设估算与上限;commit 逐阶段上报消耗(stageId/role/usage,source 默认 self-report)。
-5. project_status:不带 projectId 列出工作区全部项目;带 projectId 看单项目详情(当前阶段/门禁态/预算聚合/SUMMARY 是否存在)。
-6. role_list / role_show:查角色清单;role_show 返回可直接拷进 subagent 调用的参数(persona/toolFilter/agentOptions)与 workspaceNote。
-7. flow_list / flow_show:查流程模板(含 stageCount/stages),workspace 库覆盖 preset 自带。
+5. project_status:不带 projectId 列出工作区全部项目(含未解决卡点数);带 projectId 看单项目详情(当前阶段/门禁态/预算聚合/SUMMARY 是否存在/卡点数)。
+6. project_block:卡点通道(优先上报,禁止降级)。report 登记(category=五维可行性维度+other)并卡住推进;resolve 记录用户裁决结论后解卡;list 查看。
+7. role_list / role_show:查角色清单;role_show 返回可直接拷进 subagent 调用的参数(persona/toolFilter/agentOptions)与 workspaceNote。
+8. flow_list / flow_show:查流程模板(含 stageCount/stages),workspace 库覆盖 preset 自带。
+
+### 可行性分析(需求分析的并行必做,2026-08-30 流程补丁)
+SPEC(clarify 阶段)必须含「可行性分析」章,五维逐条给结论(可行 / 有条件可行(条件+责任方) / 不可行):
+- 设计可行性(信息完备):需求/参照物/交互样本/边界是否足够产出设计;不足处列为待补信息;
+- 开发可行性(复杂度):体量/技术依赖/角色工时是否在能力内;超限给分期建议;
+- 测试可行性(环境与数据):验证所需环境(浏览器/上游/数据/凭据)是否可得;**不可得 → 哪些验收标准无法真实验证,必须 project_block 上报,禁止以静态检查替代放行**;
+- 部署可行性(权限):目标路径可写性/沙箱边界/凭据/重启窗口/需用户侧配合的事项(APPLY.md 交接);
+- 验收可行性(验收者能力):最终"好不好"由谁判定、判定者是否具备手段(如视觉验收必须有眼睛——流水线角色无浏览器无视觉,视觉类验收必须由用户侧执行并设为 blocking 门禁,不得排为交付后事项)。
+任一维度"有条件/不可行"→ SPEC 显著标注 + 登记 project_block;spec-gate 呈递前自查本章完备。
+
+### 卡点纪律(优先上报,禁止降级,2026-08-30 流程补丁)
+- 任何角色/协调者遇卡点(无法胜任、验证手段缺失、环境不具备、依赖缺失、权限不足)**第一时间 project_block report**,并写明原因与候选方案;**禁止**:把"无法验证"写成范围说明放行、用替代手段静默降级、自行缩范围后宣布完成。
+- 卡点 open 期间 project_advance 拒绝推进(机制强制停摆);协调者收到 open 卡点**必须立即呈递用户裁决**(结算通知/门禁/接待面),不得代替用户裁决,也不得自行消化。
+- resolve 必须携带用户裁决结论(决议原文 + 后续安排);留痕进 journal。
+- 背景:i3 美化迭代实测——设计与验收角色无浏览器无视觉,却以"静态层全过/无法验证项不阻塞"完成了视觉任务并推进到 delivered,真值缺陷(raw markdown 裸显)全链放行。本纪律即为封死该通路。
 
 ### 阶段类型四词表
 - work:派一个角色干一件活(必有 role),角色结算后由协调者校验并推进。
@@ -1098,18 +1300,66 @@ export function apply(ctx, config = {}) {
           if (value.projects.length === 0) return [{ type: 'text', text: '工作区还没有任何项目(用 project_register 登记)。' }];
           return [{ type: 'text', text: [
             `工作区共 ${value.projects.length} 个项目:`,
-            ...value.projects.map((p) => `- ${p.id}「${p.title}」${p.state},第 ${p.iteration} 次迭代,阶段 #${p.stageIndex + 1}(更新于 ${p.updatedAt})`),
+            ...value.projects.map((p) => `- ${p.id}「${p.title}」${p.state},第 ${p.iteration} 次迭代,阶段 #${p.stageIndex + 1}${p.openBlockers > 0 ? `,⚠ ${p.openBlockers} 个未解决卡点` : ''}(更新于 ${p.updatedAt})`),
           ].join('\n') }];
         }
         const p = value.project;
         return [{ type: 'text', text: [
-          `项目 ${p.projectId}「${p.title}」:${p.state},第 ${p.iteration} 次迭代,当前阶段 #${p.stageIndex + 1} ${p.currentStage ? `${p.currentStage.id}(${stageTypeLabel(p.currentStage.type)})` : '(指针越界)'},gateStatus=${JSON.stringify(p.gateStatus)},流程 ${p.flowRef}`,
+          `项目 ${p.projectId}「${p.title}」:${p.state},第 ${p.iteration} 次迭代,当前阶段 #${p.stageIndex + 1} ${p.currentStage ? `${p.currentStage.id}(${stageTypeLabel(p.currentStage.type)})` : '(指针越界)'},gateStatus=${JSON.stringify(p.gateStatus)},流程 ${p.flowRef}${p.openBlockers > 0 ? `,⚠ 未解决卡点 ${p.openBlockers} 个(project_block list 查看)` : ''}`,
           `预算:committed ${p.budget.totals.entries} 条;SUMMARY ${p.summaryExists ? '已存在' : '尚无'};更新于 ${p.updatedAt}`,
         ].join('\n') }];
       },
     },
     async execute(args, context) {
       return api.status(args, context);
+    },
+  });
+
+  ctx.tools.register({
+    name: 'project_block',
+    description: '卡点通道:遇卡点(无法胜任/验证手段缺失/环境不具备/依赖缺失/权限不足)优先上报,禁止降级处理。report 登记卡点并卡住推进(open 期间 project_advance 拒绝);resolve 记录用户裁决结论后解卡;list 查看全部卡点。协调者收到 open 卡点必须立即呈递用户,不得代替裁决、不得以缩范围/替代手段静默消化。',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        projectId: { type: 'string', description: '项目 id。' },
+        action: { type: 'string', enum: ['report', 'resolve', 'list'], description: 'report=登记卡点;resolve=记录裁决并解卡;list=查看全部。' },
+        category: {
+          type: 'string',
+          enum: [...BLOCKER_CATEGORIES],
+          description: 'report 用,卡点分类=五维可行性维度:design-info=设计信息不完备;dev-complexity=开发复杂度超限;test-env=测试环境/数据不具备;deploy-permission=部署权限/沙箱限制;acceptance-capability=验收手段与验收者能力不匹配(如视觉验收无视觉);other=其他。',
+        },
+        reason: { type: 'string', description: 'report 必填:卡点是什么、为什么在当前能力/环境下无法解决(非空)。' },
+        raisedBy: { type: 'string', description: '上报方(角色 id 或 coordinator/intake)。' },
+        options: { type: 'array', items: { type: 'string' }, description: '候选处理方案(供用户裁决,非空字符串数组)。' },
+        recommendation: { type: 'string', description: '上报方建议。' },
+        blockerId: { type: 'string', description: 'resolve 必填:要解决的卡点 id(如 b1)。' },
+        resolution: { type: 'string', description: 'resolve 必填:用户裁决结论与后续安排(非空)。' },
+      },
+      required: ['projectId', 'action'],
+    },
+    output: {
+      schema: BLOCK_OUTPUT_SCHEMA,
+      render: (args, value) => {
+        if (args.action === 'list') {
+          if (!value.blockers || value.blockers.length === 0) return [{ type: 'text', text: `项目 ${args.projectId} 没有卡点记录。` }];
+          return [{ type: 'text', text: [
+            `项目 ${args.projectId} 卡点(未解决 ${value.openBlockers} 个):`,
+            ...value.blockers.map((b) => `- ${b.id} [${b.status}] ${blockerCategoryLabel(b.category)}:${b.reason}${b.resolution ? `(裁决:${b.resolution})` : ''}`),
+          ].join('\n') }];
+        }
+        const b = value.blocker;
+        if (args.action === 'report') {
+          return [{ type: 'text', text: [
+            `项目 ${args.projectId} 已登记卡点 ${b.id}(${blockerCategoryLabel(b.category)}):${b.reason}`,
+            `当前未解决卡点 ${value.openBlockers} 个;卡点解决前流程无法推进(project_advance 拒绝)。协调者应立即呈递用户裁决。`,
+          ].join('\n') }];
+        }
+        return [{ type: 'text', text: `项目 ${args.projectId} 卡点 ${b.id} 已解决:${b.resolution}(剩余未解决 ${value.openBlockers} 个,归零后可恢复推进)。` }];
+      },
+    },
+    async execute(args, context) {
+      return api.block(args, context);
     },
   });
 
