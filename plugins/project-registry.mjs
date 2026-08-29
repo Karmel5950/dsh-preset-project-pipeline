@@ -941,10 +941,10 @@ export function apply(ctx, config = {}) {
     },
     output: {
       schema: REGISTER_OUTPUT_SCHEMA,
-      render: (_args, value) => [
+      render: (_args, value) => [{ type: 'text', text: [
         `已登记项目 ${value.projectId}(目录:${value.projectDir})`,
         `流程共 ${value.flowSummary.length} 个阶段;下一阶段 #${value.nextStage.index + 1} ${value.nextStage.id}(${stageTypeLabel(value.nextStage.type)}${value.nextStage.role ? ` · ${value.nextStage.role}` : ''})。`,
-      ].join('\n'),
+      ].join('\n') }],
     },
     async execute(args, context) {
       return api.register(args, context);
@@ -970,7 +970,7 @@ export function apply(ctx, config = {}) {
     },
     output: {
       schema: ADVANCE_OUTPUT_SCHEMA,
-      render: (args, value) => `项目 ${args.projectId} 推进到阶段 #${value.stageIndex + 1} ${value.stage.id}(${stageTypeLabel(value.stage.type)}${value.stage.role ? ` · ${value.stage.role}` : ''},第 ${value.iteration} 次迭代);日志:${value.journalPath}`,
+      render: (args, value) => [{ type: 'text', text: `项目 ${args.projectId} 推进到阶段 #${value.stageIndex + 1} ${value.stage.id}(${stageTypeLabel(value.stage.type)}${value.stage.role ? ` · ${value.stage.role}` : ''},第 ${value.iteration} 次迭代);日志:${value.journalPath}` }],
     },
     async execute(args, context) {
       return api.advance(args, context);
@@ -1012,7 +1012,7 @@ export function apply(ctx, config = {}) {
     },
     output: {
       schema: GATE_OUTPUT_SCHEMA,
-      render: (args, value) => `项目 ${args.projectId} 门禁 ${args.stageId} → ${value.gateStatus};门禁包:${value.gatePath}`,
+      render: (args, value) => [{ type: 'text', text: `项目 ${args.projectId} 门禁 ${args.stageId} → ${value.gateStatus};门禁包:${value.gatePath}` }],
     },
     async execute(args, context) {
       return api.gate(args, context);
@@ -1046,10 +1046,10 @@ export function apply(ctx, config = {}) {
     },
     output: {
       schema: BUDGET_OUTPUT_SCHEMA,
-      render: (args, value) => [
+      render: (args, value) => [{ type: 'text', text: [
         `项目 ${args.projectId} 预算(${args.action})`,
         `账面:estimate=${JSON.stringify(value.estimate)};cap=${JSON.stringify(value.cap)};committed ${value.totals.entries} 条;按角色 ${JSON.stringify(value.totals.byRole)};按来源 ${JSON.stringify(value.totals.bySource)}`,
-      ].join('\n'),
+      ].join('\n') }],
     },
     async execute(args, context) {
       return api.budget(args, context);
@@ -1070,17 +1070,17 @@ export function apply(ctx, config = {}) {
       schema: STATUS_OUTPUT_SCHEMA,
       render: (_args, value) => {
         if (value.projects) {
-          if (value.projects.length === 0) return '工作区还没有任何项目(用 project_register 登记)。';
-          return [
+          if (value.projects.length === 0) return [{ type: 'text', text: '工作区还没有任何项目(用 project_register 登记)。' }];
+          return [{ type: 'text', text: [
             `工作区共 ${value.projects.length} 个项目:`,
             ...value.projects.map((p) => `- ${p.id}「${p.title}」${p.state},第 ${p.iteration} 次迭代,阶段 #${p.stageIndex + 1}(更新于 ${p.updatedAt})`),
-          ].join('\n');
+          ].join('\n') }];
         }
         const p = value.project;
-        return [
+        return [{ type: 'text', text: [
           `项目 ${p.projectId}「${p.title}」:${p.state},第 ${p.iteration} 次迭代,当前阶段 #${p.stageIndex + 1} ${p.currentStage ? `${p.currentStage.id}(${stageTypeLabel(p.currentStage.type)})` : '(指针越界)'},gateStatus=${JSON.stringify(p.gateStatus)},流程 ${p.flowRef}`,
           `预算:committed ${p.budget.totals.entries} 条;SUMMARY ${p.summaryExists ? '已存在' : '尚无'};更新于 ${p.updatedAt}`,
-        ].join('\n');
+        ].join('\n') }];
       },
     },
     async execute(args, context) {

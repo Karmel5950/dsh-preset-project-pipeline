@@ -618,26 +618,26 @@ test('output.render:各工具渲染出含关键信息的字符串', async (t) =>
   const registerText = getTool(ctx, 'project_register').output.render(
     {},
     { projectId: 'p1', projectDir: '/d/p1', flowSummary: [{ index: 0, id: 'a', type: 'work' }], nextStage: { index: 0, id: 'a', type: 'work', role: 'dev' } },
-  );
+  ).map((b) => b.text).join('\n');
   assert.match(registerText, /p1/);
   assert.match(registerText, /下一阶段/);
   const advanceText = getTool(ctx, 'project_advance').output.render(
     { projectId },
     { stageIndex: 1, iteration: 1, stage: { index: 1, id: 'review', type: 'gate' }, journalPath: 'j.md' },
-  );
+  ).map((b) => b.text).join('\n');
   assert.match(advanceText, /review/);
   assert.match(advanceText, /j\.md/);
   const gateText = getTool(ctx, 'project_gate').output.render(
     { projectId, stageId: 'review' },
     { gateStatus: 'pending', gatePath: 'g.md' },
-  );
+  ).map((b) => b.text).join('\n');
   assert.match(gateText, /pending/);
   const budgetText = getTool(ctx, 'project_budget').output.render(
     { projectId, action: 'get' },
     { estimate: null, cap: null, committed: [], totals: { entries: 0, byRole: {}, bySource: {} } },
-  );
+  ).map((b) => b.text).join('\n');
   assert.match(budgetText, /committed 0 条/);
-  const listText = getTool(ctx, 'project_status').output.render({}, { projects: [] });
+  const listText = getTool(ctx, 'project_status').output.render({}, { projects: [] }).map((b) => b.text).join('\n');
   assert.match(listText, /还没有任何项目/);
   await getTool(ctx, 'project_register').execute({ title: 'Render One', requirement: 'r' }, context);
   const detailText = getTool(ctx, 'project_status').output.render(
@@ -651,7 +651,7 @@ test('output.render:各工具渲染出含关键信息的字符串', async (t) =>
         summaryExists: false,
       },
     },
-  );
+  ).map((b) => b.text).join('\n');
   assert.match(detailText, /render-one/);
 });
 

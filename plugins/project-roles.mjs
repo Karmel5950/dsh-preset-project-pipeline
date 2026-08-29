@@ -184,7 +184,7 @@ export function apply(ctx, config = {}) {
           const lines = value.roles.length === 0 ? ['角色库为空。'] : [`可用角色 ${value.roles.length} 个:`];
           for (const role of value.roles) lines.push(`- ${role.id}[${role.source}] ${role.summary}`);
           for (const item of value.errors) lines.push(`(已跳过坏条目 ${item.file}:${item.error})`);
-          return lines.join('\n');
+          return [{ type: 'text', text: lines.join('\n') }];
         },
       },
       async execute(_args, exec) {
@@ -249,7 +249,7 @@ export function apply(ctx, config = {}) {
           required: ['id', 'source', 'summary', 'persona', 'subagent', 'workspaceNote'],
         },
         render: (_args, value) =>
-          [`【${value.id}·${value.source}】${value.summary}`, value.persona, `工作空间纪律:${value.workspaceNote}`].join('\n'),
+          [{ type: 'text', text: [`【${value.id}·${value.source}】${value.summary}`, value.persona, `工作空间纪律:${value.workspaceNote}`].join('\n') }],
       },
       async execute(args, exec) {
         const resolved = await resolveLib(exec);
@@ -316,7 +316,7 @@ export function apply(ctx, config = {}) {
           const lines = value.flows.length === 0 ? ['流程库为空。'] : [`可用流程模板 ${value.flows.length} 条:`];
           for (const flow of value.flows) lines.push(`- ${flow.id}@${flow.version}[${flow.source}] ${flow.stageCount} 个阶段`);
           for (const item of value.errors) lines.push(`(已跳过坏条目 ${item.file}:${item.error})`);
-          return lines.join('\n');
+          return [{ type: 'text', text: lines.join('\n') }];
         },
       },
       async execute(_args, exec) {
@@ -384,7 +384,7 @@ export function apply(ctx, config = {}) {
             if (stage.note) bits.push(`备注:${stage.note}`);
             lines.push(bits.join(' | '));
           });
-          return lines.join('\n');
+          return [{ type: 'text', text: lines.join('\n') }];
         },
       },
       async execute(args, exec) {

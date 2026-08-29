@@ -455,20 +455,20 @@ test('output.render 冒烟:四工具渲染含关键字段', async () =>
     const exec = execFor(workspace);
 
     const rolesValue = await byName.role_list.execute({}, exec);
-    const rolesText = byName.role_list.output.render({}, rolesValue);
+    const rolesText = byName.role_list.output.render({}, rolesValue).map((b) => b.text).join('\n');
     assert.match(rolesText, /coordinator\[preset\]/);
     assert.match(rolesText, /可用角色 6 个/);
 
     const showValue = await byName.role_show.execute({ role: 'coordinator', projectId: 'p1' }, exec);
-    const showText = byName.role_show.output.render({ role: 'coordinator' }, showValue);
+    const showText = byName.role_show.output.render({ role: 'coordinator' }, showValue).map((b) => b.text).join('\n');
     assert.match(showText, /【coordinator·preset】/);
     assert.match(showText, /项目协调者/);
 
     const flowsValue = await byName.flow_list.execute({}, exec);
-    assert.match(byName.flow_list.output.render({}, flowsValue), /standard-flow@1\[preset\] 11 个阶段/);
+    assert.match(byName.flow_list.output.render({}, flowsValue).map((b) => b.text).join('\n'), /standard-flow@1\[preset\] 11 个阶段/);
 
     const flowValue = await byName.flow_show.execute({ flow: 'standard-flow' }, exec);
-    const flowText = byName.flow_show.output.render({}, flowValue);
+    const flowText = byName.flow_show.output.render({}, flowValue).map((b) => b.text).join('\n');
     assert.match(flowText, /02\. \[gate\] spec-gate/);
     assert.match(flowText, /09\. \[gate\] delivery-gate \| 门禁:交付验收/);
   }));
