@@ -145,8 +145,7 @@ export function apply(ctx, config = {}) {
     return resolved;
   };
 
-  const disposeTools = [
-    ctx.tools.register({
+  ctx.tools.register({
       name: 'role_list',
       description:
         '列出项目流水线可用角色(preset 自带角色库 + workspace .dsh-library/roles 覆盖,同 id workspace 胜);坏清单条目自动跳过并在 errors 里说明。开工前先在此选角色。',
@@ -196,8 +195,9 @@ export function apply(ctx, config = {}) {
         const errors = (resolved.roleErrors ?? []).map((item) => ({ file: item.file, error: errorText(item.error) }));
         return { roles, errors };
       },
-    }),
-    ctx.tools.register({
+  });
+
+  ctx.tools.register({
       name: 'role_show',
       description:
         '展开一份角色清单:返回全文 persona 与可直接拷进 subagent 调用的参数(persona/toolFilter/agentOptions)及工作空间纪律;spawn 角色前必用。',
@@ -274,8 +274,9 @@ export function apply(ctx, config = {}) {
           workspaceNote: workspaceNoteFor(manifest, projectId),
         };
       },
-    }),
-    ctx.tools.register({
+  });
+
+  ctx.tools.register({
       name: 'flow_list',
       description:
         '列出项目流水线可用流程模板(preset 自带 flows/ + workspace .dsh-library/flows 覆盖,同 id workspace 胜);坏模板条目自动跳过并在 errors 里说明。登记项目前选模板用。',
@@ -331,8 +332,9 @@ export function apply(ctx, config = {}) {
         const errors = (resolved.flowErrors ?? []).map((item) => ({ file: item.file, error: errorText(item.error) }));
         return { flows, errors };
       },
-    }),
-    ctx.tools.register({
+  });
+
+  ctx.tools.register({
       name: 'flow_show',
       description: '展开一份流程模板的阶段序列(逐阶段 id/类型/角色/门禁呈递物),用于编排推进或定制新模板时参考。',
       parameters: {
@@ -395,11 +397,6 @@ export function apply(ctx, config = {}) {
         }
         return { id: entry.flow.id ?? flowId, version: entry.flow.version, source: entry.source, stages: entry.flow.stages };
       },
-    }),
-  ];
-
-  // 官方约定:插件停止时撤除全部贡献。
-  ctx.effect(() => {
-    for (const dispose of disposeTools) dispose?.();
   });
+
 }

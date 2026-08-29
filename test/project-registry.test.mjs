@@ -100,7 +100,7 @@ async function advanceTo(t, ctx, workspace, projectId, targetIndex) {
 
 // ── 插件元数据与挂载 ────────────────────────────────────────────────────────
 
-test('插件元数据:5 个工具 + 1 条手册提示段,dispose 全部撤除', async () => {
+test('插件元数据:5 个工具 + 1 条手册提示段(注册常驻,不接线 ctx.effect)', async () => {
   const ctx = await mountPlugin();
   assert.equal(name, 'project-pipeline-registry');
   assert.deepEqual(inject, ['tools', 'systemPrompt']);
@@ -118,9 +118,6 @@ test('插件元数据:5 个工具 + 1 条手册提示段,dispose 全部撤除', 
   for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement']) {
     assert.ok(section.text.includes(word), `手册段应包含 ${word}`);
   }
-  await ctx.dispose();
-  assert.equal(ctx.tools.items.length, 0);
-  assert.equal(ctx.systemPrompt.items.length, 0);
 });
 
 test('config 校验:registryDir/libraryDir 非法时挂载即失败(fail-fast)', async () => {

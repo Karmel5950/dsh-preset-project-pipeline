@@ -15,7 +15,9 @@
 // 单测经 context 注入(stub:{ agent: { session: { header: { cwd: <临时目录> } } } })覆盖该来源。
 //
 // 硬约束:零 npm import(仅 node: 内置 + ./project-lib.mjs);写文件一律 node:fs/promises;
-// 一切贡献经 ctx.effect() 挂清理;config 在 apply 内 fail-fast 校验。
+// 贡献不接线 ctx.effect 手动清理(preset 行上下文中该回调在挂载定型期被触发,会把贡献
+// 全部 dispose 掉 —— 实测教训 2026-08-29;官方 tool-fs/persona/custom-bash 均不接线,
+// services 自管理生命周期);config 在 apply 内 fail-fast 校验。
 
 import { existsSync, readFileSync } from 'node:fs';
 import { appendFile, mkdir, readdir, writeFile } from 'node:fs/promises';
@@ -912,15 +914,13 @@ export function apply(ctx, config = {}) {
   // preset 自带库 = 插件文件 ../..(即 preset 根)下的 roles|flows(SPEC §4 库解析)。
   const presetDir = fileURLToPath(new URL('..', import.meta.url));
   const api = makeApi({ cfg, presetDir, logger: ctx.logger });
-  const disposers = [];
-
-  disposers.push(ctx.systemPrompt.section({
+  ctx.systemPrompt.section({
     name: 'project-pipeline/manual',
     order: 140,
     text: MANUAL_TEXT,
-  }));
+  });
 
-  disposers.push(ctx.tools.register({
+  ctx.tools.register({
     name: 'project_register',
     description: '登记新项目:创建 <workspace>/<projectId>/.dsh-project 登记簿骨架(REGISTRY/FLOW/BUDGET/REQUIREMENT.md),按模板或定制阶段实例化流程,返回项目 id 与流程概要。projectId 由标题清洗为 kebab slug,冲突自动 -2 递增。',
     parameters: {
@@ -949,9 +949,9 @@ export function apply(ctx, config = {}) {
     async execute(args, context) {
       return api.register(args, context);
     },
-  }));
+  });
 
-  disposers.push(ctx.tools.register({
+  ctx.tools.register({
     name: 'project_advance',
     description: '推进项目流程指针到下一阶段。门禁待裁决时拒绝;approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 指定的 work 阶段;在最后阶段给 appendStages 可开启新迭代。每次推进自动写 journal 并刷新 REGISTRY.updatedAt。',
     parameters: {
@@ -975,9 +975,9 @@ export function apply(ctx, config = {}) {
     async execute(args, context) {
       return api.advance(args, context);
     },
-  }));
+  });
 
-  disposers.push(ctx.tools.register({
+  ctx.tools.register({
     name: 'project_gate',
     description: '门禁两步制:present 把摘要/材料/建议写成门禁包(gates/NN-<stageId>.md)并置 pending;decide 记录用户裁决(approve/revise/reject)——revise 必给 reviseTo(work 阶段 id),reject 使项目终态。stageId 必须是当前阶段。',
     parameters: {
@@ -1017,9 +1017,9 @@ export function apply(ctx, config = {}) {
     async execute(args, context) {
       return api.gate(args, context);
     },
-  }));
+  });
 
-  disposers.push(ctx.tools.register({
+  ctx.tools.register({
     name: 'project_budget',
     description: '项目预算账本(BUDGET.json):get 查账(含 totals 聚合);set-estimate / set-cap 设置估算与上限(形状自由,工具不解释);commit 逐阶段上报消耗(entry.stageId/role/usage,source 默认 self-report)。每阶段结算后都应上报一次。',
     parameters: {
@@ -1054,9 +1054,9 @@ export function apply(ctx, config = {}) {
     async execute(args, context) {
       return api.budget(args, context);
     },
-  }));
+  });
 
-  disposers.push(ctx.tools.register({
+  ctx.tools.register({
     name: 'project_status',
     description: '项目查询:不带 projectId 列出工作区全部项目(id/标题/状态/迭代/阶段);带 projectId 返回单项目详情(当前阶段、门禁态、预算 totals、SUMMARY 是否存在)。',
     parameters: {
@@ -1086,12 +1086,8 @@ export function apply(ctx, config = {}) {
     async execute(args, context) {
       return api.status(args, context);
     },
-  }));
-
-  // 官方约定:每个贡献都要能在插件停止时撤除 —— 经 ctx.effect 挂清理。
-  ctx.effect(() => {
-    for (const dispose of disposers.splice(0)) dispose?.();
   });
+
 }
 
 export default { name, inject, apply };

@@ -217,14 +217,12 @@ test('validateConfig:非法配置 fail-fast,合法配置回落默认', () => {
   assert.throws(() => validateConfig({ unknown: 1 }), /不支持的 config 键/);
 });
 
-test('apply 注册 4 个工具,dispose 全部撤除', async () => {
+test('apply 注册 4 个工具(注册常驻,不接线 ctx.effect)', async () => {
   const { ctx } = await mountTools(lib);
   assert.deepEqual(
     ctx.tools.items.map((tool) => tool.name).sort(),
     [...TOOL_NAMES].sort(),
   );
-  await ctx.dispose();
-  assert.equal(ctx.tools.items.length, 0);
 });
 
 test('每个工具都有纯 JSON Schema 参数与 output.schema/render', async () => {
