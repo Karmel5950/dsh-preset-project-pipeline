@@ -1,0 +1,4 @@
+name: Project Pipeline
+description: >-
+  项目制交付:对话登记 → 协调者驱动的角色流水线,流程是数据不是代码;
+  定位与全景见 plugindev/project-pipeline/DESIGN.md §1。

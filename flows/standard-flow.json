@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "standard-flow",
+  "version": 1,
+  "stages": [
+    { "id": "clarify", "type": "work", "role": "product", "produces": ["SPEC.md"] },
+    { "id": "spec-gate", "type": "gate", "title": "需求规格确认", "present": ["SPEC.md"] },
+    { "id": "design", "type": "work", "role": "architect", "produces": ["DESIGN.md"] },
+    { "id": "mid-summary", "type": "summary" },
+    { "id": "design-gate", "type": "gate", "title": "设计与UX评审", "present": ["DESIGN.md"] },
+    { "id": "build", "type": "work", "role": "dev", "produces": ["code"] },
+    { "id": "test", "type": "work", "role": "tester" },
+    { "id": "accept", "type": "work", "role": "product", "note": "代用户首轮验收:按 SPEC 验收标准逐条核对,不过打回 build 内部返工" },
+    { "id": "delivery-gate", "type": "gate", "title": "交付验收", "present": ["DELIVERY.md"] },
+    { "id": "wrap", "type": "summary" },
+    { "id": "harvest", "type": "internalize" }
+  ]
+}
