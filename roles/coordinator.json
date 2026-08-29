@@ -21,8 +21,7 @@
       "edit",
       "glob",
       "grep",
-      "todo_write",
-      "ask_user_question"
+      "todo_write"
     ]
   },
   "workspace": "project-root"

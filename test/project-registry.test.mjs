@@ -431,15 +431,11 @@ test('project_gate:重复 present 拒绝;未 present 就 decide 拒绝;stageId/�
   );
 });
 
-test('project_advance:最后阶段无 appendStages 拒绝;合法 appendStages 开新迭代', async (t) => {
+test('project_advance:最后阶段无 appendStages = 结项(delivered);appendStages 开新迭代;终态拒绝', async (t) => {
   const { workspace, ctx, projectId } = await registerMini(t);
   const context = sessionContext(workspace);
   const paths = registryPaths(workspace, projectId);
   await advanceTo(t, ctx, workspace, projectId, 2); // → wrap(最后阶段)
-  await assert.rejects(
-    () => getTool(ctx, 'project_advance').execute({ projectId }, context),
-    /最后一个阶段/,
-  );
   await assert.rejects(
     () => getTool(ctx, 'project_advance').execute({ projectId, appendStages: [{ id: 'a', type: 'work', role: 'dev' }, { id: 'a', type: 'work', role: 'dev' }] }, context),
     /appendStages/,
@@ -460,6 +456,20 @@ test('project_advance:最后阶段无 appendStages 拒绝;合法 appendStages �
   const registry = await readJson(paths.registryFile);
   assert.equal(registry.iteration, 2);
   assert.ok(existsSync(result.journalPath));
+
+  // 走到追加流程的尽头:fix → final-gate(末阶段)→ 无 appendStages 的推进 = 结项
+  await getTool(ctx, 'project_advance').execute({ projectId }, context);
+  const done = await getTool(ctx, 'project_advance').execute({ projectId }, context);
+  assert.equal(done.delivered, true, '最后阶段无 appendStages 的推进 = 结项');
+  assert.equal(done.state, 'delivered');
+  assert.equal(done.journalPath, null, '结项不写 journal');
+  const closed = await readJson(paths.registryFile);
+  assert.equal(closed.state, 'delivered');
+  await assert.rejects(
+    () => getTool(ctx, 'project_advance').execute({ projectId }, context),
+    /终态/,
+    'delivered 后拒绝继续推进',
+  );
 });
 
 test('project_advance:appendStages 在非最后阶段拒绝且不落盘', async (t) => {
@@ -708,6 +718,11 @@ test('lib:validateRole 校验与归一化(workspace 缺省/危险相对路径)',
   assert.equal(validateRole({ id: 'dev', persona: 'p', summary: 's', permissions: { approval: 'ask' } }).ok, false, 'P1 approval 固定 inherit');
   assert.equal(validateRole({ id: 'dev', persona: 'p', summary: 's', workspace: '../outside' }).ok, false, '拒绝 .. 段');
   assert.equal(validateRole({ id: 'dev', persona: 'p', summary: 's', workspace: 'C:\\out' }).ok, false, '拒绝绝对路径');
+  assert.equal(
+    validateRole({ id: 'dev', persona: 'p', summary: 's', tools: { allow: ['read', 'ask_user_question'] } }).ok,
+    false,
+    'allow 含 ask_user_question 拒绝(后台 continuable 角色提问无人应答会死锁,2026-08-29 实测)',
+  );
   const custom = validateRole({
     id: 'dev', summary: 's', persona: 'p', workspace: 'sub/dir',
     tools: { deny: ['bash'] }, model: { maxTokens: 8, reasoningEffort: 'high' },

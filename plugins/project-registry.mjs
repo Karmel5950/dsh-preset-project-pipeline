@@ -361,12 +361,10 @@ function makeApi({ cfg, presetDir, logger }) {
     };
   }
 
-  /** 常规推进:+1;已在最后阶段则必须有 appendStages(返回追加后的第一个新阶段)。 */
+  /** 常规推进:+1;最后阶段 + appendStages → 追加;最后阶段无 appendStages → 结项(delivered)。 */
   function regularAdvance(stages, curIndex, appendList) {
     if (curIndex < stages.length - 1) return { nextIndex: curIndex + 1, appended: false };
-    if (appendList === undefined) {
-      throw new Error(`${name}/project_advance: 已是流程最后一个阶段;开启新迭代请给 appendStages(要追加的阶段序列)`);
-    }
+    if (appendList === undefined) return { delivered: true };
     return { nextIndex: stages.length, appended: true };
   }
 
@@ -443,6 +441,24 @@ function makeApi({ cfg, presetDir, logger }) {
       }
     } else {
       applyStep(regularAdvance(stages, curIndex, appendList));
+    }
+
+    // 结项出口(2026-08-29 补 delivered 语义):最后阶段无 appendStages 的推进 =
+    // 交付完成。state→delivered(终态,后续变更被 assertActive 拒绝);不写 journal
+    // (没有目标阶段),返回携带终态供协调者汇报结项。
+    if (nextIndex === undefined) {
+      const now = new Date().toISOString();
+      registry.state = 'delivered';
+      registry.updatedAt = now;
+      await writeJson(paths.registryFile, registry);
+      return {
+        stageIndex: curIndex,
+        iteration: registry.iteration,
+        stage: stageBrief(cur, curIndex),
+        journalPath: null,
+        delivered: true,
+        state: 'delivered',
+      };
     }
 
     const target = flow.stages[nextIndex];
@@ -829,9 +845,11 @@ const ADVANCE_OUTPUT_SCHEMA = {
     stageIndex: { type: 'integer' },
     iteration: { type: 'integer' },
     stage: stageBriefSchema(),
-    journalPath: { type: 'string' },
+    journalPath: { oneOf: [{ type: 'string' }, { type: 'null' }] },
+    delivered: { type: 'boolean' },
+    state: { type: 'string', enum: ['active', 'delivered'] },
   },
-  required: ['stageIndex', 'iteration', 'stage', 'journalPath'],
+  required: ['stageIndex', 'iteration', 'stage', 'journalPath', 'delivered', 'state'],
 };
 
 const GATE_OUTPUT_SCHEMA = {
@@ -880,7 +898,7 @@ const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
 
 ### 工具速查(登记簿 5 + 库 4)
 1. project_register:登记新项目。title+requirement 必填;flowTemplate 选模板(默认 standard-flow)或给 flowStages 现场定制;可带 budgetEstimate。返回项目 id 与流程概要。
-2. project_advance:推进到下一阶段。门禁 pending 会拒绝;approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1)。每次推进自动写 journal。
+2. project_advance:推进到下一阶段。门禁 pending 会拒绝;approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1);在最后阶段不给 appendStages = 结项(state→delivered,此后不可再推进)。常规推进自动写 journal;结项不写 journal、返回 delivered:true。
 3. project_gate:门禁两步。present 把摘要/材料/建议写成门禁包并置 pending;decide 记录用户裁决(approve/revise/reject),revise 必给 reviseTo(流程中已有的 work 阶段 id),reject 使项目终态。
 4. project_budget:get 查账(含 totals);set-estimate / set-cap 设估算与上限;commit 逐阶段上报消耗(stageId/role/usage,source 默认 self-report)。
 5. project_status:不带 projectId 列出工作区全部项目;带 projectId 看单项目详情(当前阶段/门禁态/预算聚合/SUMMARY 是否存在)。
@@ -970,7 +988,9 @@ export function apply(ctx, config = {}) {
     },
     output: {
       schema: ADVANCE_OUTPUT_SCHEMA,
-      render: (args, value) => [{ type: 'text', text: `项目 ${args.projectId} 推进到阶段 #${value.stageIndex + 1} ${value.stage.id}(${stageTypeLabel(value.stage.type)}${value.stage.role ? ` · ${value.stage.role}` : ''},第 ${value.iteration} 次迭代);日志:${value.journalPath}` }],
+      render: (args, value) => [{ type: 'text', text: value.delivered
+        ? `项目 ${args.projectId} 已交付结项(state=delivered,第 ${value.iteration} 次迭代;最后阶段 ${value.stage.id})。后续推进会被拒绝;开新迭代请登记反馈后用 appendStages。`
+        : `项目 ${args.projectId} 推进到阶段 #${value.stageIndex + 1} ${value.stage.id}(${stageTypeLabel(value.stage.type)}${value.stage.role ? ` · ${value.stage.role}` : ''},第 ${value.iteration} 次迭代);日志:${value.journalPath}` }],
     },
     async execute(args, context) {
       return api.advance(args, context);

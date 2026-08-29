@@ -194,6 +194,12 @@ export function validateRole(role) {
         return bad(`角色 ${role.id} 的 tools.${key} 必须是非空字符串数组`);
       }
     }
+    // 死锁禁令(2026-08-29 流水线实测):流水线角色一律以后台 continuable spawn,
+    // ask_user_question 的提问挂在自己会话上无人应答 → 角色永久挂起。澄清与疑问
+    // 只能走 SPEC 遗留疑问 / 门禁包 / journal,由用户在门禁点看到。
+    if (Array.isArray(tools.allow) && tools.allow.includes('ask_user_question')) {
+      return bad(`角色 ${role.id} 的 tools.allow 含 ask_user_question:后台 continuable 角色的提问无人应答会永久挂起(实测死锁);疑问请写 SPEC 遗留疑问或门禁包`);
+    }
   }
   let workspace = 'project-root';
   if (role.workspace !== undefined) {
