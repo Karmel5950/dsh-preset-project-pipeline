@@ -236,7 +236,7 @@
         backgroundMode: continuable
         maxDepth: 4
         toolFilter:
-          allow: [read, glob, grep, web_search, todo_write, project_budget, project_block]
+          allow: [read, glob, grep, write, web_search, todo_write, project_budget, project_block]
 
     - id: tool-subagent-deliverer
       name: '@deepseek-ai/dsh-tool-subagent'

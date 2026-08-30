@@ -7,6 +7,7 @@
       "read",
       "glob",
       "grep",
+      "write",
       "web_search",
       "todo_write",
       "project_budget",
