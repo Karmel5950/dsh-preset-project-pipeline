@@ -241,6 +241,69 @@
         backgroundMode: continuable
         maxDepth: 4
 
+    # ── per-role 工具行(perm-boundary-p1 · R2 线索 c:静态 toolFilter,persona 动态经 prompt 传)──
+    # 白名单唯一生效通道:spawn request 仅在 config.toolFilter 有定义时携带(dsh-tool-subagent L230-232)。
+    # 角色清单变更需改这里 + 重启;coordinator.json 的 allow 须与 coordinator 行保持一致。
+    - id: tool-subagent-architect
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent_architect
+        backgroundMode: continuable
+        maxDepth: 4
+        toolFilter:
+          allow: [read, glob, grep, web_search, todo_write, project_budget, project_block]
+
+    - id: tool-subagent-deliverer
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent_deliverer
+        backgroundMode: continuable
+        maxDepth: 4
+        toolFilter:
+          allow: [read, glob, grep, bash, write, todo_write, project_budget, project_block]
+
+    - id: tool-subagent-dev
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent_dev
+        backgroundMode: continuable
+        maxDepth: 4
+        toolFilter:
+          allow: [read, write, edit, glob, grep, bash, todo_write, subagent, send_message, project_budget, project_block]
+
+    - id: tool-subagent-product
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent_product
+        backgroundMode: continuable
+        maxDepth: 4
+        toolFilter:
+          allow: [read, write, glob, grep, web_search, web_fetch, todo_write, project_budget, project_block]
+
+    - id: tool-subagent-tester
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent_tester
+        backgroundMode: continuable
+        maxDepth: 4
+        toolFilter:
+          allow: [read, glob, grep, bash, todo_write, project_budget, project_block]
+
+    - id: tool-subagent-coordinator
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent_coordinator
+        backgroundMode: continuable
+        maxDepth: 4
+        toolFilter:
+          allow: [project_advance, project_gate, project_budget, project_status, role_list, role_show, flow_list, flow_show, subagent, subagent_fork, subagent_architect, subagent_deliverer, subagent_dev, subagent_product, subagent_tester, send_message, interrupt_agent, read, write, edit, glob, grep, todo_write, project_block]
+
     # Production dsh does not install these optional providers. Install the
     # matching Bundle in this Profile and restart the Host, then copy this
     # preset and remove `disabled` from the matching tool row. Host availability
@@ -277,6 +340,13 @@
 - id: project-roles
   name: './plugins/project-roles.mjs'
   config: {}
+
+# R3 删除命令拦截 guard(perm-boundary-p1):拦 pwsh/bash 删除命令,引导 .trash + Move-Item;
+# exemptPaths 内放行(项目内部临时目录)。机制见 DESIGN §3.5。
+- id: project-delete-guard
+  name: './plugins/project-delete-guard.mjs'
+  config:
+    exemptPaths: ['.tmp', 'experiment', '.trash']
 
 # ── remaining model-facing rows ─────────────────────────────────────────────
 

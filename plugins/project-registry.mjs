@@ -1141,7 +1141,8 @@ source 用默认 self-report;estimate/cap 形状自由,工具不解释其内容�
 ### 路径纪律
 - 一切项目文件都在 <workspace>/<projectId>/ 内;projectId 由标题清洗为 kebab slug,含路径分隔符或 ".." 的 id 一律拒绝。
 - 角色 workspace=project-root:只在 <workspace>/<projectId>/ 内读写;journal 用 write 追加;登记簿 JSON 只经上述工具修改,不手改。
-- 内化产出只写 <workspace>/.dsh-library/(workspace 级),不回写 preset 目录。`;
+- 内化产出只写 <workspace>/.dsh-library/(workspace 级),不回写 preset 目录。
+- 生产源码路径黑名单(角色自律声明):沙箱当前允许写整个工作区(含生产源码),白名单对你不强制;角色只应写 <workspace>/<projectId>/ 内,绝不写 presets/、.dsh-home/profiles/、dsh-runtime/ 等生产路径。需改生产源码一律产出 deliverables/ + APPLY.md 由用户侧代应用。`;
 
 // ── 插件主体 ────────────────────────────────────────────────────────────────
 
