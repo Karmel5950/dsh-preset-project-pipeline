@@ -5,9 +5,14 @@
 //
 // 硬约束:零 npm import(仅 node: 内置);登记簿/库文件一律 JSON;
 // 写文件一律 node:fs/promises,JSON 落盘 2 空格缩进 + 末尾换行。
+//
+// 0.5.0 新增(机制1/机制2,2026-08-30):
+//   - 机制1 既定裁决库:BLOCKER_CATEGORIES / validateRulings / readRulings / matchRuling;
+//   - 机制2 失败模式聚合:collectAllBlockers / aggregateByCategory / buildFailureReport
+//     (纯函数,作为协调者 harvest 手动步骤的规范参考实现,单测锁定形状)。
 
 import { readFileSync, readdirSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 
 /** 阶段类型词汇表(框架的强约束;扩类型 = 模板 semver minor,改语义 = major)。 */
@@ -15,6 +20,16 @@ export const STAGE_TYPES = ['work', 'gate', 'summary', 'internalize'];
 
 /** 预算 source 口径枚举(钉死;自报/事件实收/消费插件三层共用一本账)。 */
 export const BUDGET_SOURCES = ['self-report', 'runtime-events', 'billing-plugin'];
+
+/** 卡点分类白名单(= 五维可行性维度 + other;与 project-registry 的 BLOCKER_CATEGORIES 对齐)。 */
+export const BLOCKER_CATEGORIES = [
+  'design-info',            // 设计可行性:信息不完备(需求/参照/边界缺失)
+  'dev-complexity',         // 开发可行性:复杂度/体量/依赖超出角色能力
+  'test-env',               // 测试可行性:验证所需环境/数据/凭据不具备
+  'deploy-permission',      // 部署可行性:目标路径权限/沙箱边界/凭据/重启窗口
+  'acceptance-capability',  // 验收可行性:验收手段与验收者能力不匹配(如视觉验收无视觉)
+  'other',
+];
 
 /** workspace 级库目录名(workspace 库覆盖 preset 自带库,同 id workspace 胜)。 */
 const LIBRARY_DIRNAME = '.dsh-library';
@@ -342,4 +357,173 @@ export async function readJson(file) {
 export async function writeJson(file, value) {
   await mkdir(dirname(file), { recursive: true });
   await writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+// ── 机制1 既定裁决库(2026-08-30 流程补丁)──────────────────────────────────
+
+/** 裁决条目允许的键(未知键 → 校验失败)。 */
+const RULING_ALLOWED_KEYS = new Set(['id', 'category', 'premise', 'conclusion', 'means']);
+
+/**
+ * 校验裁决库结构(机制1)。value 为解析后的对象。
+ * 要求:schemaVersion=1;rulings 为非空数组;每条含 id/category/premise/conclusion/means;
+ * category ∈ BLOCKER_CATEGORIES;未知键 → 失败。返回 { ok, value } 或 { ok:false, error }。
+ * 供单测(AC-m1-t1)与 product 引用前自查。
+ */
+export function validateRulings(value) {
+  if (!isPlainObject(value)) return bad('裁决库必须是 JSON 对象');
+  const allowed = new Set(['schemaVersion', 'rulings']);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) return bad(`裁决库含未知键 "${key}"`);
+  }
+  if (value.schemaVersion !== 1) return bad(`不支持的 schemaVersion(仅支持 1),得到 ${JSON.stringify(value.schemaVersion)}`);
+  if (!Array.isArray(value.rulings) || value.rulings.length === 0) return bad('rulings 必须是非空数组');
+  const seen = new Set();
+  for (let i = 0; i < value.rulings.length; i++) {
+    const r = value.rulings[i];
+    const at = `rulings[${i}]`;
+    if (!isPlainObject(r)) return bad(`${at} 必须是对象`);
+    for (const key of Object.keys(r)) {
+      if (!RULING_ALLOWED_KEYS.has(key)) return bad(`${at} 含未知键 "${key}"`);
+    }
+    if (!nonEmptyString(r.id)) return bad(`${at}.id 必填(非空字符串)`);
+    if (seen.has(r.id)) return bad(`${at}.id 重复:${r.id}`);
+    seen.add(r.id);
+    if (!BLOCKER_CATEGORIES.includes(r.category)) {
+      return bad(`${at}.category 必须是 ${BLOCKER_CATEGORIES.join('/')} 之一,得到 ${JSON.stringify(r.category)}`);
+    }
+    for (const key of ['premise', 'conclusion', 'means']) {
+      if (!nonEmptyString(r[key])) return bad(`${at}.${key} 必填(非空字符串)`);
+    }
+  }
+  return good(value);
+}
+
+/**
+ * 读既定裁决库(机制1)。读 <workspaceDir>/.dsh-library/rulings.json。
+ * 缺失/坏 JSON/结构非法 → 返回 { rulings: [], error }(不炸调用方,product 可据此照常上报)。
+ */
+export async function readRulings(workspaceDir) {
+  const file = join(workspaceDir, LIBRARY_DIRNAME, 'rulings.json');
+  let text;
+  try {
+    text = await readFile(file, 'utf8');
+  } catch (error) {
+    return { rulings: [], error: `读取裁决库失败:${error?.code ?? error?.message ?? error}` };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { rulings: [], error: `裁决库不是合法 JSON:${file}` };
+  }
+  const checked = validateRulings(parsed);
+  if (!checked.ok) return { rulings: [], error: `裁决库结构非法:${checked.error}` };
+  return { rulings: checked.value.rulings };
+}
+
+/**
+ * 命中判据(机制1 m1-r3):返回首个 category 相同 且 premise 与当前情形一致
+ * (前提一致才命中)的裁决;否则 undefined。
+ * 前提一致判定为宽松包含:把裁决前提按标点/空白切分为关键词(长度 ≥2),当前情形
+ * 文本包含全部关键词即视为一致。前提不成立则命中失效、仍上报(保守,宁多报不误吞)。
+ */
+export function matchRuling(rulings, { category, premise }) {
+  if (!Array.isArray(rulings)) return undefined;
+  if (typeof category !== 'string' || typeof premise !== 'string') return undefined;
+  for (const ruling of rulings) {
+    if (ruling?.category !== category) continue;
+    if (typeof ruling?.premise !== 'string' || ruling.premise.length === 0) continue;
+    const keywords = ruling.premise.split(/[/()，。；、\s]+/).filter((w) => w.length >= 2);
+    if (keywords.length === 0) {
+      if (premise.includes(ruling.premise)) return ruling;
+      continue;
+    }
+    if (keywords.every((k) => premise.includes(k))) return ruling;
+  }
+  return undefined;
+}
+
+// ── 机制2 失败模式聚合(2026-08-30 流程补丁)────────────────────────────────
+
+/**
+ * 扫 workspaceDir 下全部项目 REGISTRY(含 delivered/终态,不遗漏),收集其
+ * blockers 历史(全部 status,含 resolved)。返回 [{ projectId, blocker }]。
+ * 坏登记簿 / 缺 blockers 字段 / 非目录项跳过(不炸调用方)。
+ * 聚合按默认登记簿布局(.dsh-project);自定义 registryDir 的项目不参与聚合。
+ */
+export async function collectAllBlockers(workspaceDir) {
+  const out = [];
+  let entries;
+  try {
+    entries = await readdir(workspaceDir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const projectId = entry.name;
+    const file = join(workspaceDir, projectId, '.dsh-project', 'REGISTRY.json');
+    let registry;
+    try {
+      registry = JSON.parse(await readFile(file, 'utf8'));
+    } catch {
+      continue;
+    }
+    if (!Array.isArray(registry?.blockers)) continue;
+    for (const blocker of registry.blockers) {
+      if (blocker !== null && typeof blocker === 'object' && typeof blocker.id === 'string') {
+        out.push({ projectId, blocker });
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * 按 category 计数,过滤 count ≥ 2,每类取代表案例(前 1~2 个,含 projectId + blockerId
+ * + reason 摘要)。返回 [{ category, count, cases }],按 count 降序。
+ */
+export function aggregateByCategory(blockers) {
+  const byCategory = new Map();
+  for (const { projectId, blocker } of blockers) {
+    const category = typeof blocker.category === 'string' ? blocker.category : 'other';
+    if (!byCategory.has(category)) byCategory.set(category, []);
+    byCategory.get(category).push({ projectId, blocker });
+  }
+  const out = [];
+  for (const [category, items] of byCategory) {
+    if (items.length < 2) continue;
+    const cases = items.slice(0, 2).map(({ projectId, blocker }) => ({
+      projectId,
+      blockerId: blocker.id,
+      reason: typeof blocker.reason === 'string' ? blocker.reason.slice(0, 80) : '',
+    }));
+    out.push({ category, count: items.length, cases });
+  }
+  out.sort((a, b) => b.count - a.count);
+  return out;
+}
+
+/** 机制项建议的启发式映射(category → 建议;未命中 → 人工研判)。 */
+const FAILURE_MECHANISM_ADVICE = {
+  'acceptance-capability': '视觉/真实观感类验收设为用户侧 blocking 门禁(既定裁决 r1)',
+  'deploy-permission': '外部路径交付落 deliverables/ + APPLY.md,部署自检 IN SYNC(r2/r3)',
+  'test-env': '真实上游/凭据类验证由用户侧 blocking 执行(既定裁决 r4)',
+  'design-info': '需求澄清补信息',
+  'dev-complexity': '分期/拆子任务',
+  other: '人工研判',
+};
+
+/**
+ * 生成四要素报告(类别 / 次数 / 代表案例 / 机制项建议)。
+ * 输入 = aggregateByCategory 的输出。返回 [{ category, count, cases, advice }]。
+ */
+export function buildFailureReport(aggregation) {
+  return aggregation.map((item) => ({
+    category: item.category,
+    count: item.count,
+    cases: item.cases,
+    advice: FAILURE_MECHANISM_ADVICE[item.category] ?? '人工研判',
+  }));
 }

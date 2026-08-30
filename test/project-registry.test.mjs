@@ -3,6 +3,7 @@
 // 打法:os.tmpdir 下 mkdtemp 临时 workspace(自建自清),stub ctx 挂插件后
 // 直接驱动 tool.execute(args, context);会话 cwd 按调研结论注入
 // context.agent.session.header.cwd(SPEC §6)。不 import B 路的 project-roles.mjs。
+// 0.5.0 新增:机制4 暂存区 parking 状态机/register 单测(见「parked 暂存区」节)。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
@@ -127,7 +128,7 @@ test('插件元数据:6 个工具 + 1 条手册提示段(注册常驻,不接线 
   const section = ctx.systemPrompt.items[0];
   assert.equal(section.name, 'project-pipeline/manual');
   assert.equal(section.order, 140);
-  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律']) {
+  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked']) {
     assert.ok(section.text.includes(word), `手册段应包含 ${word}`);
   }
 });
@@ -168,6 +169,7 @@ test('project_register:建全骨架,REGISTRY/FLOW/BUDGET/REQUIREMENT 落盘', as
     sessionContext(workspace),
   );
   assert.equal(result.projectId, 'demo-app');
+  assert.equal(result.state, 'active');
   assert.equal(result.nextStage.id, 'do');
   assert.equal(result.nextStage.type, 'work');
   assert.equal(result.flowSummary.length, 3);
@@ -310,6 +312,8 @@ test('project_advance:常规推进写 journal 头条并刷新 updatedAt', async 
   assert.equal(result.stageIndex, 1);
   assert.equal(result.iteration, 1);
   assert.equal(result.stage.id, 'review');
+  assert.equal(result.delivered, false);
+  assert.equal(result.state, 'active');
   assert.ok(result.journalPath.includes('02-review.md'));
   assert.ok(existsSync(result.journalPath));
   const journal = await readFile(result.journalPath, 'utf8');
@@ -647,13 +651,13 @@ test('output.render:各工具渲染出含关键信息的字符串', async (t) =>
   const context = sessionContext(workspace);
   const registerText = getTool(ctx, 'project_register').output.render(
     {},
-    { projectId: 'p1', projectDir: '/d/p1', flowSummary: [{ index: 0, id: 'a', type: 'work' }], nextStage: { index: 0, id: 'a', type: 'work', role: 'dev' } },
+    { projectId: 'p1', projectDir: '/d/p1', state: 'active', flowSummary: [{ index: 0, id: 'a', type: 'work' }], nextStage: { index: 0, id: 'a', type: 'work', role: 'dev' } },
   ).map((b) => b.text).join('\n');
   assert.match(registerText, /p1/);
   assert.match(registerText, /下一阶段/);
   const advanceText = getTool(ctx, 'project_advance').output.render(
     { projectId },
-    { stageIndex: 1, iteration: 1, stage: { index: 1, id: 'review', type: 'gate' }, journalPath: 'j.md' },
+    { stageIndex: 1, iteration: 1, stage: { index: 1, id: 'review', type: 'gate' }, journalPath: 'j.md', delivered: false, state: 'active' },
   ).map((b) => b.text).join('\n');
   assert.match(advanceText, /review/);
   assert.match(advanceText, /j\.md/);
@@ -928,4 +932,96 @@ test('project_block:report 校验(category 白名单/未知键/必填)+ list + �
   const tool = getTool(ctx, 'project_block');
   const rendered = tool.output.render({ projectId, action: 'list' }, { blockers: [], openBlockers: 0 });
   assert.ok(Array.isArray(rendered) && rendered[0].type === 'text');
+});
+
+// ── 机制4 暂存区 parking(2026-08-30 流程补丁)────────────────────────────
+
+test('parked:register parked:true → state=parked,入册成功(AC-m4-t1)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  const result = await getTool(ctx, 'project_register').execute({
+    title: 'Parked Idea', requirement: '暂存的需求', flowTemplate: 'mini-flow', parked: true,
+  }, context);
+  assert.equal(result.projectId, 'parked-idea');
+  assert.equal(result.state, 'parked');
+  assert.equal(result.nextStage.id, 'do');
+  // 入册照常:REGISTRY/FLOW/BUDGET/REQUIREMENT 落盘,stageIndex=0
+  const paths = registryPaths(workspace, 'parked-idea');
+  assert.ok(existsSync(paths.registryFile) && existsSync(paths.flowFile) && existsSync(paths.budgetFile) && existsSync(paths.requirementFile));
+  const registry = await readJson(paths.registryFile);
+  assert.equal(registry.state, 'parked');
+  assert.equal(registry.stageIndex, 0);
+  // status 可见 state=parked
+  const detail = await getTool(ctx, 'project_status').execute({ projectId: 'parked-idea' }, context);
+  assert.equal(detail.project.state, 'parked');
+});
+
+test('parked:register parked 参数校验(非布尔拒绝)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await assert.rejects(
+    () => getTool(ctx, 'project_register').execute({ title: 'x', requirement: 'r', parked: 'yes' }, context),
+    /parked/,
+  );
+});
+
+test('parked:advance activate:true → parked→active,stageIndex=0(AC-m4-t2/p4)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'Parked Act', requirement: 'r', flowTemplate: 'mini-flow', parked: true }, context);
+  const result = await getTool(ctx, 'project_advance').execute({ projectId: 'parked-act', activate: true }, context);
+  assert.equal(result.activated, true);
+  assert.equal(result.state, 'active');
+  assert.equal(result.stageIndex, 0);
+  assert.equal(result.stage.id, 'do');
+  assert.equal(result.delivered, false);
+  const registry = await readJson(registryPaths(workspace, 'parked-act').registryFile);
+  assert.equal(registry.state, 'active');
+  assert.equal(registry.stageIndex, 0);
+  // 激活后可正常推进
+  const next = await getTool(ctx, 'project_advance').execute({ projectId: 'parked-act' }, context);
+  assert.equal(next.stageIndex, 1);
+  assert.equal(next.stage.id, 'review');
+});
+
+test('parked:advance 不设 activate 一律拒绝(AC-m4-t2)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'Parked Reject', requirement: 'r', flowTemplate: 'mini-flow', parked: true }, context);
+  await assert.rejects(
+    () => getTool(ctx, 'project_advance').execute({ projectId: 'parked-reject' }, context),
+    /parked.*激活|激活.*parked/,
+  );
+  // 不落盘:state 仍 parked
+  const registry = await readJson(registryPaths(workspace, 'parked-reject').registryFile);
+  assert.equal(registry.state, 'parked');
+});
+
+test('parked:gate/block 对 parked 项目 assertActive 拒绝(AC-m4-t2)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'Parked Gate', requirement: 'r', flowTemplate: 'mini-flow', parked: true }, context);
+  await assert.rejects(
+    () => getTool(ctx, 'project_gate').execute({ projectId: 'parked-gate', stageId: 'do', action: 'present', package: { summary: 's' } }, context),
+    /终态|parked/,
+  );
+  await assert.rejects(
+    () => getTool(ctx, 'project_block').execute({ projectId: 'parked-gate', action: 'report', category: 'other', reason: 'x' }, context),
+    /终态|parked/,
+  );
+  // budget/status 对 parked 可用
+  const budget = await getTool(ctx, 'project_budget').execute({ projectId: 'parked-gate', action: 'get' }, context);
+  assert.equal(budget.totals.entries, 0);
+  const detail = await getTool(ctx, 'project_status').execute({ projectId: 'parked-gate' }, context);
+  assert.equal(detail.project.state, 'parked');
 });

@@ -2,6 +2,17 @@
 
 本 preset 的全部显著变更记录在此文件。
 
+## [0.5.0] - 2026-08-30
+
+自成长四机制增强(pipeline-selfgrowth 交付;背景:确认型卡点重复消耗、失败模式靠人发现、perm-boundary-p1 的 STALE 事故、用户提了但不想现在做的需求无处安放)。
+
+- **机制1 既定裁决库**:新增 workspace 库 `.dsh-library/rulings.json`(用户可自增裁决免部署、免重启),种子四条(视觉类=用户侧 blocking/截图+双核验;外部路径=deliverables+APPLY;preset/宿主改动=IN SYNC+重启攒批;真实上游/凭据/无人值守=用户侧 blocking);project-lib 增 `readRulings`/`validateRulings`/`matchRuling` 纯函数(命中判据=前提一致才命中);product persona 增「先读裁决库、命中不重抛、不一致仍上报」引用规则;MANUAL_TEXT 增「既定裁决库」小节
+- **机制2 失败模式聚合**:project-lib 增 `collectAllBlockers`/`aggregateByCategory`/`buildFailureReport` 纯函数(规范参考实现,单测锁定形状);coordinator persona 增 harvest 聚合步骤(扫全部 sibling REGISTRY blockers 含 delivered,同 category ≥2 → 四要素报告写 SUMMARY + 随结算上抛 intake);边界=聚合是呈递材料非卡点,勿用 project_block;MANUAL_TEXT 增「失败模式聚合」小节
+- **机制3 部署自检**:coordinator persona 增部署自检核对规则(读部署戳 .plugindev-deploy.json + 源码 package.json version + git HEAD → IN SYNC 判据);门禁包三要素(戳版本/commit、源码 HEAD、是否 IN SYNC);IN SYNC=false 作为 approve 前置;MANUAL_TEXT 增「部署自检」小节;APPLY.md 必含 deploy IN SYNC 步骤
+- **机制4 暂存区 parking**:project_register 增 `parked` 参数(默认 false)→ REGISTRY.state='parked'(入册不 spawn);project_advance 增 parked 激活路径(`activate:true` → parked→active,stageIndex=0),parked 不设 activate 一律拒绝;ADVANCE/REGISTER 输出 schema 增 state/activated;intake persona 增 parked 语义(入册不 spawn、激活后 spawn);coordinator 触点比对含 parked(标注不冲突);看板 project-hub 增「暂存区」分组 + state.parked 徽章(i18n zh「暂存」/en「Parked」+ CSS data-state=parked);MANUAL_TEXT 增「暂存区 parked 语义」小节
+- 版本 0.4.0 → **0.5.0(minor)**:parked 状态 + 失败模式聚合 = 能力新增
+- 测试:project-registry.test.mjs 增 parked 状态机/register 单测;新增 project-lib.test.mjs(裁决库解析/校验/命中 + 聚合);host-plugin project-hub.test.mjs 增 parked 透传回归
+
 ## [0.4.0] - 2026-08-30
 
 spawn 硬化(perm-boundary-p2 交付;背景:p1 建立的 per-role 工具行白名单存在残余洞——通用 subagent/subagent_fork 无过滤通道,p1 R2-AC5 一轮探针实证 56 工具全量泄漏,二轮修全)。

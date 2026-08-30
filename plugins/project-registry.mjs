@@ -18,6 +18,14 @@
 // 贡献不接线 ctx.effect 手动清理(preset 行上下文中该回调在挂载定型期被触发,会把贡献
 // 全部 dispose 掉 —— 实测教训 2026-08-29;官方 tool-fs/persona/custom-bash 均不接线,
 // services 自管理生命周期);config 在 apply 内 fail-fast 校验。
+//
+// 0.5.0 新增(机制1~4,2026-08-30):
+//   - 机制1 既定裁决库:MANUAL_TEXT 增「既定裁决库」小节(引用规则/命中判据/用户可自增);
+//   - 机制2 失败模式聚合:MANUAL_TEXT 增「失败模式聚合」小节(harvest 步骤 + 边界);
+//   - 机制3 部署自检:MANUAL_TEXT 增「部署自检」小节(适用判定/核对步骤/门禁包三要素);
+//   - 机制4 暂存区 parking:register 增 parked 参数(state='parked');advance 增 parked
+//     激活路径(activate:true → parked→active,stageIndex=0);ADVANCE/REGISTER 输出 schema
+//     增 state/activated;MANUAL_TEXT 增「暂存区 parked 语义」小节。
 
 import { existsSync, readFileSync } from 'node:fs';
 import { appendFile, mkdir, readdir, writeFile } from 'node:fs/promises';
@@ -342,6 +350,10 @@ function makeApi({ cfg, presetDir, logger }) {
     if (args.budgetEstimate !== undefined && !isPlainObject(args.budgetEstimate)) {
       throw new Error(`${name}/project_register: budgetEstimate 必须是对象`);
     }
+    // 机制4:parked 参数(默认 false)。parked:true → REGISTRY.state='parked'(入册不 spawn)。
+    if (args.parked !== undefined && typeof args.parked !== 'boolean') {
+      throw new Error(`${name}/project_register: parked 必须是布尔值(默认 false)`);
+    }
     let customStages;
     if (args.flowStages !== undefined) {
       const checked = validateStageList(args.flowStages);
@@ -384,7 +396,7 @@ function makeApi({ cfg, presetDir, logger }) {
       stageIndex: 0,
       gateStatus: null,
       blockers: [],
-      state: 'active',
+      state: args.parked === true ? 'parked' : 'active',
     };
     const flow = { schemaVersion: 1, id: flowId, version: flowVersion, stages, source: flowSource, revision: 1 };
     const budget = { schemaVersion: 1, estimate: args.budgetEstimate ?? null, cap: null, committed: [] };
@@ -403,6 +415,7 @@ function makeApi({ cfg, presetDir, logger }) {
     return {
       projectId,
       projectDir: paths.projectDir,
+      state: registry.state,
       flowSummary: stages.map((stage, index) => stageBrief(stage, index)),
       nextStage: stageBrief(stages[0], 0),
     };
@@ -439,6 +452,31 @@ function makeApi({ cfg, presetDir, logger }) {
     const paths = pathsFor(workspaceDir, projectId);
     const registry = await readJson(paths.registryFile);
     assertRegistry(registry, paths.registryFile);
+    const flow = await readJson(paths.flowFile);
+    const stages = Array.isArray(flow.stages) ? flow.stages : [];
+
+    // 机制4:parked 激活路径。parked 项目只能经 activate:true 激活(parked→active,
+    // stageIndex=0/clarify),否则一律拒绝(不进入常规推进/结项)。
+    if (registry.state === 'parked') {
+      if (args.activate === true) {
+        const now = new Date().toISOString();
+        registry.state = 'active';
+        registry.updatedAt = now;
+        await writeJson(paths.registryFile, registry);
+        const first = stages[0];
+        return {
+          activated: true,
+          state: 'active',
+          stageIndex: 0,
+          iteration: registry.iteration,
+          stage: first ? stageBrief(first, 0) : null,
+          journalPath: null,
+          delivered: false,
+        };
+      }
+      throw new Error(`${name}/project_advance: 项目 ${projectId} 处于 parked(暂存)状态,需先激活(parked→active)才能推进;请用 project_advance(projectId, activate:true)`);
+    }
+
     assertActive(registry, projectId);
     // 卡点纪律(2026-08-30 流程补丁):有未解决卡点的项目不许推进——
     // 卡点必须先呈递用户裁决、project_block resolve 后流程才能继续。
@@ -446,8 +484,6 @@ function makeApi({ cfg, presetDir, logger }) {
     if (openBlockers.length > 0) {
       throw new Error(`${name}/project_advance: 项目存在未解决卡点,先呈递用户裁决并 project_block resolve 后才能推进:${openBlockers.map((b) => `${b.id}(${blockerCategoryLabel(b.category)})`).join('、')}`);
     }
-    const flow = await readJson(paths.flowFile);
-    const stages = Array.isArray(flow.stages) ? flow.stages : [];
     const curIndex = registry.stageIndex;
     const cur = stages[curIndex];
     if (!cur) {
@@ -536,6 +572,8 @@ function makeApi({ cfg, presetDir, logger }) {
       iteration: registry.iteration,
       stage: stageBrief(target, nextIndex),
       journalPath,
+      delivered: false,
+      state: 'active',
     };
   }
 
@@ -992,10 +1030,11 @@ const REGISTER_OUTPUT_SCHEMA = {
   properties: {
     projectId: { type: 'string' },
     projectDir: { type: 'string' },
+    state: { type: 'string', enum: ['active', 'parked'] },
     flowSummary: { type: 'array', items: stageBriefSchema() },
     nextStage: stageBriefSchema(),
   },
-  required: ['projectId', 'projectDir', 'flowSummary', 'nextStage'],
+  required: ['projectId', 'projectDir', 'state', 'flowSummary', 'nextStage'],
 };
 
 const ADVANCE_OUTPUT_SCHEMA = {
@@ -1007,7 +1046,8 @@ const ADVANCE_OUTPUT_SCHEMA = {
     stage: stageBriefSchema(),
     journalPath: { oneOf: [{ type: 'string' }, { type: 'null' }] },
     delivered: { type: 'boolean' },
-    state: { type: 'string', enum: ['active', 'delivered'] },
+    state: { type: 'string', enum: ['active', 'parked', 'delivered'] },
+    activated: { type: 'boolean' },
   },
   required: ['stageIndex', 'iteration', 'stage', 'journalPath', 'delivered', 'state'],
 };
@@ -1088,8 +1128,8 @@ const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
 角色库与流程库在 <workspace>/.dsh-library/(roles|flows),workspace 同名条目覆盖 preset 自带。
 
 ### 工具速查(登记簿 6 + 库 4)
-1. project_register:登记新项目。title+requirement 必填;flowTemplate 选模板(默认 standard-flow)或给 flowStages 现场定制;可带 budgetEstimate。返回项目 id 与流程概要。
-2. project_advance:推进到下一阶段。**存在未解决卡点(project_block)会拒绝**;门禁 pending 会拒绝;**门禁未呈递(gateStatus=null)也会拒绝**——必须先 present 呈递并等用户裁决(2026-08-29 实测收紧:协调者曾未呈递直接穿过门禁);approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1);在最后阶段不给 appendStages = 结项(state→delivered,此后不可再推进)。常规推进自动写 journal;结项不写 journal、返回 delivered:true。
+1. project_register:登记新项目。title+requirement 必填;flowTemplate 选模板(默认 standard-flow)或给 flowStages 现场定制;可带 budgetEstimate;可带 parked(默认 false,true → state='parked' 入册不 spawn)。返回项目 id、state 与流程概要。
+2. project_advance:推进到下一阶段。**存在未解决卡点(project_block)会拒绝**;门禁 pending 会拒绝;**门禁未呈递(gateStatus=null)也会拒绝**——必须先 present 呈递并等用户裁决(2026-08-29 实测收紧:协调者曾未呈递直接穿过门禁);approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1);在最后阶段不给 appendStages = 结项(state→delivered,此后不可再推进)。**parked 项目只能经 activate:true 激活(parked→active,stageIndex=0),否则一律拒绝**。常规推进自动写 journal;结项不写 journal、返回 delivered:true。
 3. project_gate:门禁两步。present 把摘要/材料/建议写成门禁包并置 pending;decide 记录用户裁决(approve/revise/reject),revise 必给 reviseTo(流程中已有的 work 阶段 id),reject 使项目终态。
 4. project_budget:get 查账(含 totals);set-estimate / set-cap 设估算与上限;commit 逐阶段上报消耗(stageId/role/usage,source 默认 self-report)。
 5. project_status:不带 projectId 列出工作区全部项目(含未解决卡点数);带 projectId 看单项目详情(当前阶段/门禁态/预算聚合/SUMMARY 是否存在/卡点数)。
@@ -1119,12 +1159,40 @@ SPEC(clarify 阶段)必须含「可行性分析」章,五维逐条给结论(可�
 - 每项目在 SPEC 声明「资源触点」(三要素:拟改文件路径[]/拟部署组件[]/需重启 bool;粒度到文件路径/组件名,允许目录级如「整个 ui/ 目录」);REQUIREMENT 尾部留指针行。
 - 协调者派活前对 active 项目清单做触点比对:读自己 SPEC 触点 → project_status 列全部 active → 逐个读其 SPEC 触点 → 冲突判定(同文件路径/同部署组件/同需重启窗口即冲突,目录级按包含关系)。
 - 冲突处理:project_block(category=other)上抛用户排序;open 期间不推进;intake 登记时发现触点重叠当场提示(不打断登记)。
+- **parked 项目进触点比对但标注不冲突**(机制4):读全部项目(含 parked)SPEC 触点;parked 项目与当前项目触点重叠 → 标注为不构成 active 冲突,不 project_block;仅 active 项目冲突才上抛。
 
 ### 重启决策规则(机制2,2026-08-30 流程补丁)
 - (a)必须重启清单:agent.cordis.yml 变更、preset 插件文件变更、profile node_modules/bundles 变更、cordis.patch.yml 变更。
 - (b)免重启清单:settings.yaml 常规键(除需初始化的段)、登记簿/文档/看板前端资源(前端资源经重新部署+浏览器刷新即可,实例无需重启)。
 - (c)重启决策树:多项目活动时优先合并部署一次重启(攒批);重启前由协调者互认停摆点;重启后用户侧按登记表逐个唤醒;攒批窗口由用户侧在门禁停摆点裁决时定。
 - (d)用户侧重启脚本已带 --no-open(重启不再弹浏览器)。
+
+### 既定裁决库(机制1,2026-08-30 流程补丁)
+- 落点:workspace 库 <workspace>/.dsh-library/rulings.json(用户可自增裁决免部署、免重启;角色 read 即读)。
+- 种子四条:①视觉/真实观感类验收=用户侧 blocking 于 delivered,手段=截图+视觉模型/DOM 双核验;②pipeline-ws 外路径=deliverables/+APPLY.md 外交接,用户侧代应用;③preset/宿主插件改动=deploy 至 IN SYNC+重启,重启窗口并入攒批;④真实上游/凭据/夜间无人值守类验证=用户侧 blocking。
+- 引用规则(product 五维可行性分析时):先读裁决库;命中既定裁决(同 category 且前提一致)→ 直接引用该裁决结论,不再对同情形重复 project_block report;情形与既定裁决前提不一致或信息不足 → 照常上报。
+- 命中判据(m1-r3):不只看 category,还要看「情形是否与既定裁决前提一致」;前提不成立则命中失效、仍上报(如视觉类=用户侧 blocking 的前提是「有视觉产物且流水线角色无视觉」;若该前提不成立,则 r1 不命中,照常上报)。
+- 用户可自增:追加 rulings 数组条目即可,免部署、免重启。
+
+### 失败模式聚合(机制2,2026-08-30 流程补丁)
+- harvest(internalize)阶段聚合步骤:扫 pipeline-ws 全部项目 REGISTRY 的 blockers 历史(含 delivered/终态,不遗漏),按 category 计数;同 category ≥2 → 生成四要素报告(类别/次数/代表案例(项目 id+卡点 id+原因摘要)/机制项建议)。
+- 报告写入 SUMMARY.md 留痕,并随结算上抛 intake 呈递用户,由用户裁决是否立项。
+- 边界(硬约束):聚合结果是「呈递材料」不是「卡点」——不得用 project_block 承载(open 期间会卡死结项,project_advance 拒绝);写入 SUMMARY + intake 呈递即可。
+- 规范参考实现:project-lib 的 collectAllBlockers/aggregateByCategory/buildFailureReport 纯函数(单测锁定形状);协调者手动步骤按同一四要素形状产出。
+
+### 部署自检(机制3,2026-08-30 流程补丁)
+- 适用判定:项目触点含 pipeline-ws 外路径(preset/宿主插件)的 accept/delivery-gate 呈递时,协调者执行部署自检。
+- 核对步骤:①读部署戳 <installRoot>/<presetId>/.plugindev-deploy.json(本机 .dsh-home/.agent-presets/project-pipeline/.plugindev-deploy.json),取 sourceVersion、gitCommit;②读源码版本 plugindev/presets/project-pipeline/package.json 的 version;③读源码 HEAD(经 read 读 git 文件 plugindev/.git/HEAD → ref → commit hash;解析失败标注「无法核对」不臆造);④对照:IN SYNC = sourceVersion===package.json version 且 gitCommit===源码 HEAD。
+- 门禁包三要素:accept/delivery-gate 呈递时,门禁包(project_gate present 的 summary/materials)必须含部署自检块:戳版本/commit、源码 HEAD、是否 IN SYNC。IN SYNC=false → 显著标注「部署副本与源码漂移,须先 deploy IN SYNC 再验收」,作为 approve 前置。
+- 最省事核对:引用 npm run deploy -- --list 输出(与戳文件同源)。
+
+### 暂存区 parked 语义(机制4,2026-08-30 流程补丁)
+- register 增 parked 参数(默认 false):parked:true → REGISTRY.state='parked',登记入册(REGISTRY/FLOW/BUDGET/REQUIREMENT 照常创建,stageIndex=0)但不 spawn 协调者。
+- 入册不 spawn:intake 登记后查 state,state==='parked' → 不 spawn 协调者;state==='active' → spawn 协调者从 clarify 开始。
+- 激活路径:project_advance(projectId, activate:true) → parked→active,stageIndex=0(clarify);激活后 intake 按 state=active spawn 协调者从 clarify 开始。
+- 状态机校验:parked 项目不设 activate 时,advance 一律拒绝(不进入常规推进/结项);gate/block 对 parked 项目 assertActive 拒绝(无 active 流程,不呈递门禁/不登记卡点);budget/status 对任何 state 可用。
+- 触点比对:parked 项目进触点比对但标注不冲突(仅 active 项目冲突才上抛 project_block)。
+- 看板:state=parked 项目进入「暂存区」独立分组呈现,不混入 active 列表;state.parked 徽章(zh「暂存」/en「Parked」)。
 
 ### 阶段类型四词表
 - work:派一个角色干一件活(必有 role),角色结算后由协调者校验并推进。
@@ -1162,7 +1230,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register({
     name: 'project_register',
-    description: '登记新项目:创建 <workspace>/<projectId>/.dsh-project 登记簿骨架(REGISTRY/FLOW/BUDGET/REQUIREMENT.md),按模板或定制阶段实例化流程,返回项目 id 与流程概要。projectId 由标题清洗为 kebab slug,冲突自动 -2 递增。',
+    description: '登记新项目:创建 <workspace>/<projectId>/.dsh-project 登记簿骨架(REGISTRY/FLOW/BUDGET/REQUIREMENT.md),按模板或定制阶段实例化流程,返回项目 id、state 与流程概要。projectId 由标题清洗为 kebab slug,冲突自动 -2 递增。parked:true → state=parked(入册不 spawn,看板进暂存区)。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -1176,15 +1244,17 @@ export function apply(ctx, config = {}) {
           items: stageParamSchema(),
         },
         budgetEstimate: { type: 'object', description: '预算估算(形状自由),登记进 BUDGET.estimate。' },
+        parked: { type: 'boolean', description: '默认 false。true → REGISTRY.state=parked(暂存):登记入册但不 spawn 协调者,看板进暂存区;激活走 project_advance(projectId, activate:true)。' },
       },
       required: ['title', 'requirement'],
     },
     output: {
       schema: REGISTER_OUTPUT_SCHEMA,
       render: (_args, value) => [{ type: 'text', text: [
-        `已登记项目 ${value.projectId}(目录:${value.projectDir})`,
+        `已登记项目 ${value.projectId}(目录:${value.projectDir},state=${value.state})`,
         `流程共 ${value.flowSummary.length} 个阶段;下一阶段 #${value.nextStage.index + 1} ${value.nextStage.id}(${stageTypeLabel(value.nextStage.type)}${value.nextStage.role ? ` · ${value.nextStage.role}` : ''})。`,
-      ].join('\n') }],
+        value.state === 'parked' ? '项目处于暂存(parked)状态:已入册,未激活,不 spawn 协调者;激活请用 project_advance(projectId, activate:true)。' : '',
+      ].filter(Boolean).join('\n') }],
     },
     async execute(args, context) {
       return api.register(args, context);
@@ -1193,7 +1263,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register({
     name: 'project_advance',
-    description: '推进项目流程指针到下一阶段。门禁待裁决时拒绝;approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 指定的 work 阶段;在最后阶段给 appendStages 可开启新迭代。每次推进自动写 journal 并刷新 REGISTRY.updatedAt。',
+    description: '推进项目流程指针到下一阶段。门禁待裁决时拒绝;approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 指定的 work 阶段;在最后阶段给 appendStages 可开启新迭代。parked 项目只能经 activate:true 激活(parked→active,stageIndex=0),否则一律拒绝。每次推进自动写 journal 并刷新 REGISTRY.updatedAt。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -1205,6 +1275,7 @@ export function apply(ctx, config = {}) {
           description: '在最后一个阶段追加的阶段序列(iteration+1,开启新迭代);仅限最后一个阶段使用。',
           items: stageParamSchema(),
         },
+        activate: { type: 'boolean', description: 'parked 项目激活用:true → parked→active,stageIndex=0(clarify);仅对 state=parked 项目生效。' },
       },
       required: ['projectId'],
     },
@@ -1212,7 +1283,9 @@ export function apply(ctx, config = {}) {
       schema: ADVANCE_OUTPUT_SCHEMA,
       render: (args, value) => [{ type: 'text', text: value.delivered
         ? `项目 ${args.projectId} 已交付结项(state=delivered,第 ${value.iteration} 次迭代;最后阶段 ${value.stage.id})。后续推进会被拒绝;开新迭代请登记反馈后用 appendStages。`
-        : `项目 ${args.projectId} 推进到阶段 #${value.stageIndex + 1} ${value.stage.id}(${stageTypeLabel(value.stage.type)}${value.stage.role ? ` · ${value.stage.role}` : ''},第 ${value.iteration} 次迭代);日志:${value.journalPath}` }],
+        : value.activated
+          ? `项目 ${args.projectId} 已激活(parked→active,state=active),从阶段 #${value.stageIndex + 1} ${value.stage?.id ?? ''}(${value.stage ? stageTypeLabel(value.stage.type) : ''})开始推进;请按 state=active spawn 协调者从 clarify 开始。`
+          : `项目 ${args.projectId} 推进到阶段 #${value.stageIndex + 1} ${value.stage.id}(${stageTypeLabel(value.stage.type)}${value.stage.role ? ` · ${value.stage.role}` : ''},第 ${value.iteration} 次迭代);日志:${value.journalPath}` }],
     },
     async execute(args, context) {
       return api.advance(args, context);
