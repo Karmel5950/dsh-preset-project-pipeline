@@ -29,7 +29,7 @@ cd ~/.dsh/.agent-presets/project-pipeline && git pull
 ```bash
 # 在主工作区仓库根目录:
 git subtree split -P plugindev/presets/project-pipeline -b preset-dist
-git push origin preset-dist:main   # origin = 本同步仓库;force 与否视快进而定
+git push preset-sync preset-dist:main   # remote 名 preset-sync 已在主仓库配置;非快进时加 -f
 git branch -D preset-dist
 ```
 
