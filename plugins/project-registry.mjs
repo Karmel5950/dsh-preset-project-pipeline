@@ -26,6 +26,10 @@
 //   - 机制4 暂存区 parking:register 增 parked 参数(state='parked');advance 增 parked
 //     激活路径(activate:true → parked→active,stageIndex=0);ADVANCE/REGISTER 输出 schema
 //     增 state/activated;MANUAL_TEXT 增「暂存区 parked 语义」小节。
+// 0.5.1 新增(迭代7 中文命名,2026-08-30):
+//   - register 解耦:新增可选 id 入参(显式英文 slug),title 自由中文;纯中文 title 无
+//     显式 id 时拒收并提示提供 id(不引入拼音依赖);混合 title 维持现状 slugify(向后兼容)。
+//   - 工具 schema 增 id 属性;MANUAL_TEXT 工具速查补 id 说明。
 
 import { existsSync, readFileSync } from 'node:fs';
 import { appendFile, mkdir, readdir, writeFile } from 'node:fs/promises';
@@ -38,6 +42,7 @@ import {
   registryPaths,
   resolveLibrary,
   slugify,
+  slugifyStrict,
   validateStageList,
   writeJson,
 } from './project-lib.mjs';
@@ -361,7 +366,24 @@ function makeApi({ cfg, presetDir, logger }) {
       customStages = checked.value;
     }
 
-    const projectId = uniqueProjectId(workspaceDir, slugify(args.title));
+    // 需求一 register 解耦(2026-08-30):可选显式 id 入参,title 自由中文。
+    // - 提供 id:校验 /^[a-z0-9][a-z0-9-]*$/(小写、字母/数字开头、只含小写字母/数字/
+    //   连字符;该正则天然拒绝路径分隔符与 '..'),projectId = uniqueProjectId(workspaceDir, args.id)。
+    // - 未提供 id 且 title 纯中文(slugifyStrict 返回 null):拒收并提示提供 id(不引入拼音依赖)。
+    // - 未提供 id 且 title 含 ASCII 片段:维持现状 slugify(向后兼容)。
+    let projectId;
+    if (args.id !== undefined) {
+      if (typeof args.id !== 'string' || !/^[a-z0-9][a-z0-9-]*$/.test(args.id)) {
+        throw new Error(`${name}/project_register: id 非法(只允许小写字母/数字/连字符,且以字母或数字开头,格式 [a-z0-9-]+;含路径分隔符或 ".." 一律拒绝):${JSON.stringify(args.id ?? null)}`);
+      }
+      projectId = uniqueProjectId(workspaceDir, args.id);
+    } else {
+      const slug = slugifyStrict(args.title);
+      if (slug === null) {
+        throw new Error(`${name}/project_register: 纯中文标题无法自动生成英文 id,请提供 id 入参(格式 [a-z0-9-]+),如 project_register({ title: '中文标题', id: 'my-slug', requirement: ... })`);
+      }
+      projectId = uniqueProjectId(workspaceDir, slug);
+    }
     const paths = pathsFor(workspaceDir, projectId);
 
     // 流程实例化:flowStages(整体替换)> 显式模板 > 默认 standard-flow。
@@ -1128,7 +1150,7 @@ const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
 角色库与流程库在 <workspace>/.dsh-library/(roles|flows),workspace 同名条目覆盖 preset 自带。
 
 ### 工具速查(登记簿 6 + 库 4)
-1. project_register:登记新项目。title+requirement 必填;flowTemplate 选模板(默认 standard-flow)或给 flowStages 现场定制;可带 budgetEstimate;可带 parked(默认 false,true → state='parked' 入册不 spawn)。返回项目 id、state 与流程概要。
+1. project_register:登记新项目。title+requirement 必填;flowTemplate 选模板(默认 standard-flow)或给 flowStages 现场定制;可带 budgetEstimate;可带 parked(默认 false,true → state='parked' 入册不 spawn)。**中文 title 建议配显式 id 入参(格式 [a-z0-9-]+)**:提供 id 时 projectId=uniqueProjectId(workspaceDir, id),title 自由中文;纯中文 title 未提供 id 会拒收并提示提供 id(不引入拼音依赖);混合 title(含 ASCII 片段)未提供 id 维持现状 slugify。返回项目 id、state 与流程概要。
 2. project_advance:推进到下一阶段。**存在未解决卡点(project_block)会拒绝**;门禁 pending 会拒绝;**门禁未呈递(gateStatus=null)也会拒绝**——必须先 present 呈递并等用户裁决(2026-08-29 实测收紧:协调者曾未呈递直接穿过门禁);approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1);在最后阶段不给 appendStages = 结项(state→delivered,此后不可再推进)。**parked 项目只能经 activate:true 激活(parked→active,stageIndex=0),否则一律拒绝**。常规推进自动写 journal;结项不写 journal、返回 delivered:true。
 3. project_gate:门禁两步。present 把摘要/材料/建议写成门禁包并置 pending;decide 记录用户裁决(approve/revise/reject),revise 必给 reviseTo(流程中已有的 work 阶段 id),reject 使项目终态。
 4. project_budget:get 查账(含 totals);set-estimate / set-cap 设估算与上限;commit 逐阶段上报消耗(stageId/role/usage,source 默认 self-report)。
@@ -1230,12 +1252,13 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register({
     name: 'project_register',
-    description: '登记新项目:创建 <workspace>/<projectId>/.dsh-project 登记簿骨架(REGISTRY/FLOW/BUDGET/REQUIREMENT.md),按模板或定制阶段实例化流程,返回项目 id、state 与流程概要。projectId 由标题清洗为 kebab slug,冲突自动 -2 递增。parked:true → state=parked(入册不 spawn,看板进暂存区)。',
+    description: '登记新项目:创建 <workspace>/<projectId>/.dsh-project 登记簿骨架(REGISTRY/FLOW/BUDGET/REQUIREMENT.md),按模板或定制阶段实例化流程,返回项目 id、state 与流程概要。projectId 由标题清洗为 kebab slug,冲突自动 -2 递增;可传显式 id(英文 slug)与中文 title 解耦。parked:true → state=parked(入册不 spawn,看板进暂存区)。',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        title: { type: 'string', description: '项目标题(必填非空),将清洗为 ASCII kebab 目录名。' },
+        title: { type: 'string', description: '项目标题(必填非空),可自由中文;未传 id 时清洗为 ASCII kebab 目录名。' },
+        id: { type: 'string', description: '可选显式英文 slug id(格式 [a-z0-9-]+,小写、字母/数字开头、只含小写字母/数字/连字符;含路径分隔符或 ".." 拒绝)。提供时 projectId=uniqueProjectId(workspaceDir, id),title 自由中文;纯中文 title 未提供 id 会拒收并提示提供 id。' },
         requirement: { type: 'string', description: '需求原文,逐字登记进 REQUIREMENT.md。' },
         flowTemplate: { type: 'string', description: '流程模板 id,默认 standard-flow;模板来自 workspace/.dsh-library/flows 与 preset 自带 flows。' },
         flowStages: {

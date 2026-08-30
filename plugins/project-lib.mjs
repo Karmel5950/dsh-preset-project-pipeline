@@ -10,6 +10,10 @@
 //   - 机制1 既定裁决库:BLOCKER_CATEGORIES / validateRulings / readRulings / matchRuling;
 //   - 机制2 失败模式聚合:collectAllBlockers / aggregateByCategory / buildFailureReport
 //     (纯函数,作为协调者 harvest 手动步骤的规范参考实现,单测锁定形状)。
+// 0.5.1 新增(迭代7 中文命名,2026-08-30):
+//   - slugifyStrict(title):复用 slugify 内部清洗逻辑,当 slugify 会回退到
+//     'project-<YYYYMMDD>' 前缀时返回 null(register 层据此拒收纯中文标题并提示提供 id)。
+//     slugify 本身不改(保持返回日期前缀,向后兼容其他调用方与既有测试)。
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
@@ -71,6 +75,22 @@ export function slugify(title) {
   let cleaned = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   if (cleaned.length > 64) cleaned = cleaned.slice(0, 64).replace(/-+$/g, '');
   if (cleaned.length === 0 || /[\\/]/.test(cleaned) || cleaned === '.' || cleaned === '..') return fallback;
+  return cleaned;
+}
+
+/**
+ * 标题 → ASCII kebab slug;当 slugify 会回退到 'project-<YYYYMMDD>' 前缀时返回 null。
+ * 复用 slugify 内部清洗逻辑(零重复),仅把「回退分支」改为返回 null。
+ * 用途:register 层判断「纯中文/无 ASCII 片段标题」→ 拒收并提示提供 id(不引入拼音依赖)。
+ * slugify 本身不改(保持返回日期前缀,向后兼容其他调用方与既有测试)。
+ * 注意:用 /^project-\d{8}$/ 正则匹配 slugify 结果会误伤真实标题「project 20260830」
+ * (slug 'project-20260830'),故用本显式辅助函数信号更干净(DESIGN §1.2)。
+ */
+export function slugifyStrict(title) {
+  if (typeof title !== 'string') return null;
+  let cleaned = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  if (cleaned.length > 64) cleaned = cleaned.slice(0, 64).replace(/-+$/g, '');
+  if (cleaned.length === 0 || /[\\/]/.test(cleaned) || cleaned === '.' || cleaned === '..') return null;
   return cleaned;
 }
 

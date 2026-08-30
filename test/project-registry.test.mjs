@@ -4,10 +4,12 @@
 // 直接驱动 tool.execute(args, context);会话 cwd 按调研结论注入
 // context.agent.session.header.cwd(SPEC §6)。不 import B 路的 project-roles.mjs。
 // 0.5.0 新增:机制4 暂存区 parking 状态机/register 单测(见「parked 暂存区」节)。
+// 0.5.1 新增(迭代7 中文命名):register 解耦单测——纯中文无 id 拒收、显式 id 合法/
+// 非法、混合 title 向后兼容、分隔符与 ".." 拒绝;slugifyStrict 纯函数单测。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { apply, inject, name } from '../plugins/project-registry.mjs';
@@ -19,6 +21,7 @@ import {
   registryPaths,
   resolveLibrary,
   slugify,
+  slugifyStrict,
   validateFlow,
   validateRole,
   validateStageList,
@@ -128,7 +131,7 @@ test('插件元数据:6 个工具 + 1 条手册提示段(注册常驻,不接线 
   const section = ctx.systemPrompt.items[0];
   assert.equal(section.name, 'project-pipeline/manual');
   assert.equal(section.order, 140);
-  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked']) {
+  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked', 'id 入参']) {
     assert.ok(section.text.includes(word), `手册段应包含 ${word}`);
   }
 });
@@ -205,7 +208,7 @@ test('project_register:建全骨架,REGISTRY/FLOW/BUDGET/REQUIREMENT 落盘', as
   assert.ok(requirement.includes('demo-app'));
 });
 
-test('project_register:同名冲突 -2 递增;纯中文标题退化为日期前缀', async (t) => {
+test('project_register:同名冲突 -2 递增;纯中文标题无 id 拒收并提示提供 id', async (t) => {
   const workspace = await makeWorkspace(t);
   await writeTemplate(workspace, 'mini-flow');
   const ctx = await mountPlugin();
@@ -214,8 +217,77 @@ test('project_register:同名冲突 -2 递增;纯中文标题退化为日期前�
   const second = await getTool(ctx, 'project_register').execute({ title: 'Demo App', requirement: 'r2' }, context);
   assert.equal(first.projectId, 'demo-app');
   assert.equal(second.projectId, 'demo-app-2');
-  const cn = await getTool(ctx, 'project_register').execute({ title: '中文项目', requirement: 'r3' }, context);
-  assert.match(cn.projectId, /^project-\d{8}$/);
+  // 迭代7:纯中文标题未提供 id → 拒收并提示提供 id(不再退化为 project-<日期> 兜底 id)。
+  await assert.rejects(
+    () => getTool(ctx, 'project_register').execute({ title: '中文项目', requirement: 'r3' }, context),
+    /请提供 id 入参/,
+  );
+  // 拒收不落盘:workspace 下没有 project-<日期> 目录。
+  const entries = await readdir(workspace, { withFileTypes: true });
+  assert.ok(!entries.some((e) => e.isDirectory() && /^project-\d{8}$/.test(e.name)), '纯中文拒收不产出日期前缀兜底 id');
+});
+
+// ── 迭代7 register 解耦单测(AC1-1~AC1-4)───────────────────────────────────
+
+test('project_register:显式 id 合法 → projectId=id,title 自由中文(AC1-1)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  const result = await getTool(ctx, 'project_register').execute({
+    title: '看板可用性:中文命名与需求背景可见',
+    id: 'kanban-cn',
+    requirement: '中文 title + 英文 slug id 解耦',
+    flowTemplate: 'mini-flow',
+  }, context);
+  assert.equal(result.projectId, 'kanban-cn', 'projectId 由显式 id 决定');
+  const registry = await readJson(registryPaths(workspace, 'kanban-cn').registryFile);
+  assert.equal(registry.id, 'kanban-cn');
+  assert.equal(registry.title, '看板可用性:中文命名与需求背景可见', 'title 自由中文,与 id 解耦');
+  // REQUIREMENT.md 首行标题 = 中文 title(非英文 id)。
+  const requirement = await readFile(registryPaths(workspace, 'kanban-cn').requirementFile, 'utf8');
+  assert.ok(requirement.includes('# 需求:看板可用性:中文命名与需求背景可见'));
+});
+
+test('project_register:显式 id 非法(非 [a-z0-9-]、含分隔符或 ..)拒收(AC1-4)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  for (const bad of ['-lead', 'Uppercase', 'a/b', 'a\\b', '..', '.', 'x y', '', 'a..b', 'a b']) {
+    await assert.rejects(
+      () => getTool(ctx, 'project_register').execute({ title: '中文标题', id: bad, requirement: 'r' }, context),
+      /id 非法/,
+      `显式 id ${JSON.stringify(bad)} 应被拒收`,
+    );
+  }
+  // 拒收不落盘:workspace 下除 .dsh-library(模板库)外无任何项目目录。
+  const entries = await readdir(workspace, { withFileTypes: true });
+  assert.ok(!entries.some((e) => e.isDirectory() && e.name !== '.dsh-library'), '非法 id 拒收不落盘');
+});
+
+test('project_register:混合 title(含 ASCII 片段)未传 id 维持现状 slugify(AC1-3)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  const result = await getTool(ctx, 'project_register').execute({ title: '重构 auth 模块', requirement: 'r' }, context);
+  assert.equal(result.projectId, 'auth', '混合 title 取 ASCII 片段,向后兼容');
+  const registry = await readJson(registryPaths(workspace, 'auth').registryFile);
+  assert.equal(registry.title, '重构 auth 模块', 'title 保留原文');
+});
+
+test('project_register:显式 id 冲突 -2 递增(与 title 解耦)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  const first = await getTool(ctx, 'project_register').execute({ title: '中文甲', id: 'dup', requirement: 'r1' }, context);
+  const second = await getTool(ctx, 'project_register').execute({ title: '中文乙', id: 'dup', requirement: 'r2' }, context);
+  assert.equal(first.projectId, 'dup');
+  assert.equal(second.projectId, 'dup-2');
+  assert.equal((await readJson(registryPaths(workspace, 'dup').registryFile)).title, '中文甲');
+  assert.equal((await readJson(registryPaths(workspace, 'dup-2').registryFile)).title, '中文乙');
 });
 
 test('project_register:flowStages 现场定制(免模板)+ budgetEstimate', async (t) => {
@@ -703,6 +775,25 @@ test('lib:slugify 清洗/回退/路径安全;nowStamp 格式', () => {
     assert.doesNotMatch(slugify(title), /[\\/]/);
   }
   assert.match(nowStamp(), /^\d{8}-\d{6}$/);
+});
+
+test('lib:slugifyStrict 复用清洗逻辑,回退分支返回 null(迭代7)', () => {
+  // 与 slugify 一致:混合/ASCII 标题返回清洗后的 slug。
+  assert.equal(slugifyStrict('Hello World!'), 'hello-world');
+  assert.equal(slugifyStrict('  --A_B 2--'), 'a-b-2');
+  assert.equal(slugifyStrict('重构 auth 模块'), 'auth');
+  assert.equal(slugifyStrict('x'.repeat(100)).length, 64, '超长标题截断');
+  // 纯中文/空/非字符串/路径逃逸 → null(slugify 会回退日期前缀的情形)。
+  assert.equal(slugifyStrict('中文标题'), null);
+  assert.equal(slugifyStrict(''), null);
+  assert.equal(slugifyStrict(42), null);
+  assert.equal(slugifyStrict('###'), null);
+  assert.equal(slugifyStrict('a/b\\c'), 'a-b-c', '清洗已把分隔符替换为连字符,不触发路径回退');
+  assert.equal(slugifyStrict('..'), null);
+  assert.equal(slugifyStrict('.'), null);
+  // 关键:真实标题「project 20260830」→ slug 'project-20260830'(非 null),
+  // 证明用 /^project-\d{8}$/ 正则匹配 slugify 结果会误伤,须用本显式辅助函数。
+  assert.equal(slugifyStrict('project 20260830'), 'project-20260830');
 });
 
 test('lib:validateStageList 校验(类型/必填/重复 id/未知键)', () => {

@@ -65,3 +65,10 @@ P1 首版:模型面闭环(纯 preset,基座 = 官方 standard 复制叠加;DESIG
 - preset 默认流程模板 `flows/standard-flow.json`:三道门只是默认模板的一条实例;登记时可选模板或定制 flowStages
 - 预算账本 BUDGET:estimate/committed/cap 三段式,P1 口径 `source: self-report`
 - 登记簿/库全部 JSON 落盘(随项目仓 git 可追溯);workspace 级 `.dsh-library/` 覆盖 preset 自带库,坏条目跳过带 errors
+
+## 0.6.0 — 2026-08-31
+
+- 迭代7 中文命名与需求背景可见(project-20260830):
+  - project_register 新增可选 id 入参(显式英文 slug),title 自由中文;纯中文 title 未提供 id 拒收并提示(不引入拼音依赖);混合 title 维持 slugify 向后兼容。新增 slugifyStrict 纯函数。
+  - MANUAL_TEXT/intake persona 增「中文 title + 英文 slug id」二元组登记纪律。
+  - project-hub:view=file 白名单加 REQUIREMENT.md;看板新增「需求」tab(inline markdown 渲染)+ 列表/详情英文 id 辅显。

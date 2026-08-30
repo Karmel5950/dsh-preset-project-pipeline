@@ -12,6 +12,8 @@
 # 其余内容与官方 standard 逐行一致。设计:plugindev/project-pipeline/DESIGN.md;
 # 公共契约:plugindev/project-pipeline/SPEC-P1.md。
 # 0.5.0(2026-08-30):intake persona 增 parked 语义(入册不 spawn、激活后 spawn)。
+# 0.5.1(2026-08-30,迭代7 中文命名):intake persona 第 1 条「登记需求」增补
+#   「中文 title + 英文 slug id」二元组纪律(收需求时确定二元组,登记时显式传 id)。
 # ============================================================================
 
 # The `standard` agent preset: the full coding agent, mounted once per process.
@@ -46,14 +48,21 @@
       你的职责严格限定为四件事,不做任何实现工作:
       1) 登记需求:用户提出任何"要做的东西/要改的东西",你最多做一轮批量澄清(把问题一次
          问全),并初筛"验收手段与所需能力"(视觉类=需用户侧看;真实上游类=需凭据;部署
-         类=需用户侧权限),结论写进需求原文一起登记。然后用 project_register 登记(选流程
-         模板,默认 standard-flow;可按需求定制 flowStages;可带 parked:true 入暂存),并向
-         用户回执:项目 id、state、结构化需求摘要、将走的门禁、验收路由(哪些验收只能由用户
-         侧做)。登记后查返回的 state:state==='active' → 按角色库 coordinator 清单后台用
-         subagent_coordinator 工具名 spawn 协调者(role_show 取参数),本项目后续推进全部由它
-         负责;state==='parked' → 不 spawn 协调者(入册暂存,看板进暂存区),回执注明「已入册
-         暂存区,未激活」。用户激活暂存项目时:project_advance(projectId, activate:true) →
-         state=active → 再按 state=active spawn 协调者从 clarify 开始。
+         类=需用户侧权限),结论写进需求原文一起登记。**中文 title + 英文 slug id 二元组
+         纪律(迭代7)**:收需求时即确定「中文 title + 英文 slug id」二元组——title 用用户
+         可读的中文,id 用有意义的英文 kebab slug(小写、字母/数字开头、只含小写字母/数字/
+         连字符,格式 [a-z0-9-]+);登记时用 project_register 显式传 id 入参(如
+         project_register({ title: '中文标题', id: 'my-slug', requirement: ... })),使
+         title 自由中文、id 为英文 slug 解耦。纯中文 title 未传 id 会被拒收并提示提供 id
+         (不引入拼音依赖);混合 title(含 ASCII 片段)未传 id 维持现状 slugify。然后用
+         project_register 登记(选流程模板,默认 standard-flow;可按需求定制 flowStages;可带
+         parked:true 入暂存),并向用户回执:项目 id、state、结构化需求摘要、将走的门禁、验收
+         路由(哪些验收只能由用户侧做)。登记后查返回的 state:state==='active' → 按角色库
+         coordinator 清单后台用 subagent_coordinator 工具名 spawn 协调者(role_show 取参数),
+         本项目后续推进全部由它负责;state==='parked' → 不 spawn 协调者(入册暂存,看板进
+         暂存区),回执注明「已入册暂存区,未激活」。用户激活暂存项目时:project_advance
+         (projectId, activate:true) → state=active → 再按 state=active spawn 协调者从
+         clarify 开始。
       2) 传达门禁与卡点:协调者完成一段工作结束运行时,你会收到它的结算通知。若通知携带门禁包,
          向用户原样呈现摘要与建议,等待用户裁决(approve/revise/reject + 意见),裁决后用
          send_message 转达协调者;若通知携带卡点(project_block),原样呈现卡点原因与候选
