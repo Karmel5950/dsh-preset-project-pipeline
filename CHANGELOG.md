@@ -2,6 +2,16 @@
 
 本 preset 的全部显著变更记录在此文件。
 
+## [0.3.0] - 2026-08-30
+
+流程修复(project-pipeline-fix-030 交付):三缺陷。
+
+- **缺陷1(通道级)**:协调者禁 self-ask——persona 写明一律不自问 ask_user_question;own 层豁免经用户侧代码级确证(dsh-tools view() own 层直接 visible.set,承重契约),不改运行时
+- **缺陷2(统一呈现面)**:intake 为唯一用户提问面;协调者等用户裁决(门禁/卡点/停摆)一律结算上抛 intake 呈现/回收/回传;统一呈递契约入 SPEC-P1 §13,监控兜底(WS question 帧+/api/respond)入 §14
+- **缺陷3**:部署形态入审计③(dev persona 三分级取证);audit-deploy-form.md 契约文档;git 源插件安装序列入 .dsh-library/lessons;市场 install 字段反馈归档
+- persona 断言 300→450(协调者承载禁自问+上抛契约,用户裁决 A-3)
+- 实测:49/49 + check 绿;模拟停摆点全链用户侧验证
+
 ## [0.2.0] - 2026-08-30
 
 流程补丁:可行性分析 + 卡点通道(背景:i3 美化迭代事故——设计与验收角色无浏览器无视觉,以"静态层全过/无法验证不阻塞"强行完成视觉任务并推进到 delivered,raw markdown 裸显缺陷全链放行;困难从未上报,而是被降级消化)。
