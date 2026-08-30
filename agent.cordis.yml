@@ -48,7 +48,7 @@
          类=需用户侧权限),结论写进需求原文一起登记。然后用 project_register 登记(选流程
          模板,默认 standard-flow;可按需求定制 flowStages),并向用户回执:项目 id、结构
          化需求摘要、将走的门禁、验收路由(哪些验收只能由用户侧做)。登记后按角色库
-         coordinator 清单后台 spawn 协调者(role_show 取参数),本项目后续推进全部由它负责。
+         coordinator 清单后台用 subagent_coordinator 工具名 spawn 协调者(role_show 取参数),本项目后续推进全部由它负责。
       2) 传达门禁与卡点:协调者完成一段工作结束运行时,你会收到它的结算通知。若通知携带门禁包,
          向用户原样呈现摘要与建议,等待用户裁决(approve/revise/reject + 意见),裁决后用
          send_message 转达协调者;若通知携带卡点(project_block),原样呈现卡点原因与候选
@@ -225,22 +225,6 @@
     - id: tool-subagent-list-agents
       name: '@deepseek-ai/dsh-tool-subagent-control/list-agents'
 
-    - id: tool-subagent
-      name: '@deepseek-ai/dsh-tool-subagent'
-      config:
-        provider: spawn
-        toolName: subagent
-        backgroundMode: continuable
-        maxDepth: 4
-
-    - id: tool-subagent-fork
-      name: '@deepseek-ai/dsh-tool-subagent'
-      config:
-        provider: fork
-        toolName: subagent_fork
-        backgroundMode: continuable
-        maxDepth: 4
-
     # ── per-role 工具行(perm-boundary-p1 · R2 线索 c:静态 toolFilter,persona 动态经 prompt 传)──
     # 白名单唯一生效通道:spawn request 仅在 config.toolFilter 有定义时携带(dsh-tool-subagent L230-232)。
     # 角色清单变更需改这里 + 重启;coordinator.json 的 allow 须与 coordinator 行保持一致。
@@ -262,7 +246,7 @@
         backgroundMode: continuable
         maxDepth: 4
         toolFilter:
-          allow: [read, glob, grep, bash, write, todo_write, project_budget, project_block]
+          allow: [read, glob, grep, pwsh, write, todo_write, project_budget, project_block]
 
     - id: tool-subagent-dev
       name: '@deepseek-ai/dsh-tool-subagent'
@@ -272,7 +256,17 @@
         backgroundMode: continuable
         maxDepth: 4
         toolFilter:
-          allow: [read, write, edit, glob, grep, bash, todo_write, subagent, send_message, project_budget, project_block]
+          allow: [read, write, edit, glob, grep, pwsh, todo_write, subagent_devhelper, send_message, project_budget, project_block]
+
+    - id: tool-subagent-devhelper
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent_devhelper
+        backgroundMode: continuable
+        maxDepth: 4
+        toolFilter:
+          allow: [read, write, edit, glob, grep, pwsh, todo_write, project_budget, project_block]
 
     - id: tool-subagent-product
       name: '@deepseek-ai/dsh-tool-subagent'
@@ -282,7 +276,7 @@
         backgroundMode: continuable
         maxDepth: 4
         toolFilter:
-          allow: [read, write, glob, grep, web_search, web_fetch, todo_write, project_budget, project_block]
+          allow: [read, write, glob, grep, web_search, todo_write, project_budget, project_block]
 
     - id: tool-subagent-tester
       name: '@deepseek-ai/dsh-tool-subagent'
@@ -292,7 +286,7 @@
         backgroundMode: continuable
         maxDepth: 4
         toolFilter:
-          allow: [read, glob, grep, bash, todo_write, project_budget, project_block]
+          allow: [read, glob, grep, pwsh, todo_write, project_budget, project_block]
 
     - id: tool-subagent-coordinator
       name: '@deepseek-ai/dsh-tool-subagent'
@@ -302,7 +296,7 @@
         backgroundMode: continuable
         maxDepth: 4
         toolFilter:
-          allow: [project_advance, project_gate, project_budget, project_status, role_list, role_show, flow_list, flow_show, subagent, subagent_fork, subagent_architect, subagent_deliverer, subagent_dev, subagent_product, subagent_tester, send_message, interrupt_agent, read, write, edit, glob, grep, todo_write, project_block]
+          allow: [project_advance, project_gate, project_budget, project_status, role_list, role_show, flow_list, flow_show, subagent_architect, subagent_deliverer, subagent_dev, subagent_product, subagent_tester, send_message, interrupt_agent, read, write, edit, glob, grep, todo_write, project_block]
 
     # Production dsh does not install these optional providers. Install the
     # matching Bundle in this Profile and restart the Host, then copy this

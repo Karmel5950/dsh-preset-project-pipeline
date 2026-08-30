@@ -7,7 +7,7 @@
       "read",
       "glob",
       "grep",
-      "bash",
+      "pwsh",
       "todo_write",
       "project_budget",
       "project_block"

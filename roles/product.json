@@ -9,7 +9,6 @@
       "glob",
       "grep",
       "web_search",
-      "web_fetch",
       "todo_write",
       "project_budget",
       "project_block"

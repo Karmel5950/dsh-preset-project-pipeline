@@ -99,7 +99,7 @@ function workspaceNoteFor(manifest, projectId) {
     return `工作空间=共享区:可在整个会话工作区 <workspace>/ 内读写;项目产出仍应优先写入 ${projectRoot},不要触碰其他项目目录。`;
   }
   if (workspace === 'project-root') {
-    return `只在 ${projectRoot} 内读写;登记簿路径前缀 ${projectRoot}.dsh-project/(REGISTRY、FLOW、journal、gates、SUMMARY 等都在其中),产出与 git 提交都留在项目目录内。注意:沙箱当前允许写整个工作区(含生产源码),白名单对你不强制;你只应写 ${projectRoot} 内,绝不写 presets/、.dsh-home/profiles/、dsh-runtime/ 等生产路径。`;
+    return `只在 ${projectRoot} 内读写;登记簿路径前缀 ${projectRoot}.dsh-project/(REGISTRY、FLOW、journal、gates、SUMMARY 等都在其中),产出与 git 提交都留在项目目录内。注意:你的会话沙箱可写根是流水线工作区 pipeline-ws,生产路径(presets/、host-plugins/、dsh-runtime/)实际写不进;你只应写 ${projectRoot} 内,绝不写 presets/、.dsh-home/profiles/、dsh-runtime/ 等生产路径。`;
   }
   return `工作空间=项目根下子目录:只在 ${projectRoot}${workspace}/ 内读写,不要越出该子目录。`;
 }

@@ -8,9 +8,10 @@
 // 集成期主线程可删除 makeLibStub 并固定为真 import。
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { apply, name, inject, validateConfig, sessionWorkspaceOf } from '../plugins/project-roles.mjs';
 import { makeStubCtx } from '../../../toolkit/stub-ctx.mjs';
 
@@ -476,4 +477,122 @@ test('output.render 冒烟:四工具渲染含关键字段', async () =>
 test(`lib 装载来源标注(当前:${usingRealLib ? '真 project-lib.mjs' : '内置 stub,集成期切换真 lib'})`, () => {
   // 非断言用例:留一条痕迹说明本次测试跑的是哪个 lib 实现。
   assert.ok(usingRealLib === true || usingRealLib === false);
+});
+// ---------------------------------------------------------------------------
+// R4 一致性断言(perm-boundary-p2):白名单配置与真实工具面一致性。
+// 基准 = 用户裁决修正后的实测工具面(R2-AC5 探针 56 工具清单为源)。
+// 零依赖:node:test + 正则,不引入 YAML 解析器。
+// ---------------------------------------------------------------------------
+const PRESET_ROOT = fileURLToPath(new URL('..', import.meta.url));
+
+// 真实工具面基准(用户裁决修正,2026-08-30):以 R2-AC5 探针子代理回报的 56 工具清单为源。
+// 维护注意:若部署工具面变化(新增工具/启用 bash)需同步更新;断言失败即提示人工核对。
+const REAL_TOOL_SURFACE = new Set([
+  // fs
+  'read', 'write', 'edit', 'glob', 'grep',
+  // shell(win32)
+  'pwsh',
+  // web
+  'web_search',
+  // todo/jobs/goal/plan
+  'todo_write', 'job_list', 'job_output', 'job_kill', 'create_goal', 'get_goal', 'update_goal', 'exit_plan_mode',
+  // ask
+  'ask_user_question',
+  // delegation
+  'subagent_architect', 'subagent_deliverer', 'subagent_dev', 'subagent_product', 'subagent_tester', 'subagent_coordinator', 'subagent_devhelper',
+  'send_message', 'interrupt_agent', 'subagent_control', 'subagent_list_agents',
+  // project-registry
+  'project_register', 'project_advance', 'project_gate', 'project_budget', 'project_status', 'project_block',
+  // project-roles
+  'role_list', 'role_show', 'flow_list', 'flow_show',
+]);
+const FORBIDDEN = ['bash', 'web_fetch', 'subagent', 'subagent_fork'];
+
+async function readPresetRoles() {
+  const dir = path.join(PRESET_ROOT, 'roles');
+  const files = (await readdir(dir)).filter((n) => n.endsWith('.json'));
+  const roles = [];
+  for (const f of files) {
+    roles.push({ file: f, json: JSON.parse(await readFile(path.join(dir, f), 'utf8')) });
+  }
+  return roles;
+}
+
+async function readAgentCordis() {
+  return await readFile(path.join(PRESET_ROOT, 'agent.cordis.yml'), 'utf8');
+}
+
+// 提取每个 toolName: subagent_<role> 行的 allow 列表(零依赖正则)。
+function extractPerRoleAllow(text) {
+  const out = new Map();
+  const rowRe = /toolName:\s*(subagent_\w+)[\s\S]*?allow:\s*\[([^\]]*)\]/g;
+  let m;
+  while ((m = rowRe.exec(text)) !== null) {
+    const names = m[2].split(',').map((s) => s.trim()).filter(Boolean);
+    out.set(m[1], names);
+  }
+  return out;
+}
+
+test('R4-AC1 角色 allow 一致性:每个名字 ∈ 真实工具面 且 ∉ FORBIDDEN', async () => {
+  const roles = await readPresetRoles();
+  assert.ok(roles.length > 0, 'preset roles 目录应有角色清单');
+  for (const { file, json } of roles) {
+    const { allow = [], deny = [] } = json.tools ?? {};
+    for (const name of [...allow, ...deny]) {
+      assert.ok(REAL_TOOL_SURFACE.has(name), `${file} 引用未知工具 "${name}"(不在真实工具面)`);
+      assert.ok(!FORBIDDEN.includes(name), `${file} 引用禁用工具 "${name}"`);
+    }
+  }
+});
+
+test('R4-AC2 coordinator/dev 不再引用通用 spawn;dev 含 subagent_devhelper 与 send_message', async () => {
+  const roles = await readPresetRoles();
+  const coord = roles.find((r) => r.json.id === 'coordinator');
+  const dev = roles.find((r) => r.json.id === 'dev');
+  assert.ok(coord && dev, 'preset 应含 coordinator 与 dev 角色');
+  const coordAllow = coord.json.tools.allow;
+  const devAllow = dev.json.tools.allow;
+  assert.ok(!coordAllow.includes('subagent'), 'coordinator allow 不应含通用 subagent');
+  assert.ok(!coordAllow.includes('subagent_fork'), 'coordinator allow 不应含 subagent_fork');
+  assert.ok(!devAllow.includes('subagent'), 'dev allow 不应含通用 subagent');
+  assert.ok(devAllow.includes('subagent_devhelper'), 'dev allow 应含 subagent_devhelper');
+  assert.ok(devAllow.includes('send_message'), 'dev allow 应保留 send_message');
+  // R2-AC4:dev persona 应指定 subagent_devhelper 工具名(不再用通用 subagent 派助手)。
+  assert.ok(dev.json.persona.includes('subagent_devhelper'), 'dev persona 应指定 subagent_devhelper 工具名(R2-AC4)');
+});
+
+test('R4-AC3 per-role 行 toolFilter 一致性:名字 ∈ 真实工具面;coordinator 行无通用 spawn;dev 行含 devhelper', async () => {
+  const text = await readAgentCordis();
+  const rows = extractPerRoleAllow(text);
+  assert.ok(rows.has('subagent_coordinator'), '应存在 subagent_coordinator 行');
+  assert.ok(rows.has('subagent_dev'), '应存在 subagent_dev 行');
+  for (const [toolName, names] of rows) {
+    for (const name of names) {
+      assert.ok(REAL_TOOL_SURFACE.has(name), `${toolName} 行引用未知工具 "${name}"`);
+      assert.ok(!FORBIDDEN.includes(name), `${toolName} 行引用禁用工具 "${name}"`);
+    }
+  }
+  const coordAllow = rows.get('subagent_coordinator');
+  assert.ok(!coordAllow.includes('subagent'), 'subagent_coordinator 行不应含通用 subagent');
+  assert.ok(!coordAllow.includes('subagent_fork'), 'subagent_coordinator 行不应含 subagent_fork');
+  const devAllow = rows.get('subagent_dev');
+  assert.ok(!devAllow.includes('subagent'), 'subagent_dev 行不应含通用 subagent');
+  assert.ok(devAllow.includes('subagent_devhelper'), 'subagent_dev 行应含 subagent_devhelper');
+});
+
+test('R4-AC4 devhelper 行存在且无 spawn 权(无 subagent、无 send_message)', async () => {
+  const text = await readAgentCordis();
+  const rows = extractPerRoleAllow(text);
+  assert.ok(rows.has('subagent_devhelper'), '应存在 subagent_devhelper 行');
+  const allow = rows.get('subagent_devhelper');
+  assert.ok(!allow.includes('subagent'), 'devhelper 行不应含 subagent');
+  assert.ok(!allow.includes('send_message'), 'devhelper 行不应含 send_message');
+});
+
+test('R4-AC5 通用两行已物理移除(无 toolName: subagent / subagent_fork)', async () => {
+  const text = await readAgentCordis();
+  assert.ok(!/toolName:\s*subagent_fork/.test(text), '不应存在 toolName: subagent_fork');
+  assert.ok(!/toolName:\s*subagent\b/.test(text), '不应存在 toolName: subagent(词边界,避免误匹配 subagent_*)');
+  assert.ok(!text.includes('subagent_fork'), '全文件不应出现 subagent_fork');
 });

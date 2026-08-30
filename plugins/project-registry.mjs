@@ -1097,6 +1097,9 @@ const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
 7. role_list / role_show:查角色清单;role_show 返回可直接拷进 subagent 调用的参数(persona/toolFilter/agentOptions)与 workspaceNote。
 8. flow_list / flow_show:查流程模板(含 stageCount/stages),workspace 库覆盖 preset 自带。
 
+### spawn 纪律
+必须用 per-role 工具名(subagent_<role> / subagent_devhelper)spawn 角色;通用 subagent/subagent_fork 已不可见(机制保证)。
+
 ### 可行性分析(需求分析的并行必做,2026-08-30 流程补丁)
 SPEC(clarify 阶段)必须含「可行性分析」章,五维逐条给结论(可行 / 有条件可行(条件+责任方) / 不可行):
 - 设计可行性(信息完备):需求/参照物/交互样本/边界是否足够产出设计;不足处列为待补信息;
@@ -1142,7 +1145,7 @@ source 用默认 self-report;estimate/cap 形状自由,工具不解释其内容�
 - 一切项目文件都在 <workspace>/<projectId>/ 内;projectId 由标题清洗为 kebab slug,含路径分隔符或 ".." 的 id 一律拒绝。
 - 角色 workspace=project-root:只在 <workspace>/<projectId>/ 内读写;journal 用 write 追加;登记簿 JSON 只经上述工具修改,不手改。
 - 内化产出只写 <workspace>/.dsh-library/(workspace 级),不回写 preset 目录。
-- 生产源码路径黑名单(角色自律声明):沙箱当前允许写整个工作区(含生产源码),白名单对你不强制;角色只应写 <workspace>/<projectId>/ 内,绝不写 presets/、.dsh-home/profiles/、dsh-runtime/ 等生产路径。需改生产源码一律产出 deliverables/ + APPLY.md 由用户侧代应用。`;
+- 生产源码路径黑名单(角色自律声明):你的会话沙箱可写根是流水线工作区 pipeline-ws,生产路径(presets/、host-plugins/、dsh-runtime/)实际写不进;但仍须只写 <workspace>/<projectId>/ 内,绝不写 presets/、.dsh-home/profiles/、dsh-runtime/ 等生产路径。需改生产源码一律产出 deliverables/ + APPLY.md 由用户侧代应用。`;
 
 // ── 插件主体 ────────────────────────────────────────────────────────────────
 
