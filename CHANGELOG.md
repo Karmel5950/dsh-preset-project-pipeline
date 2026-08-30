@@ -2,6 +2,17 @@
 
 本 preset 的全部显著变更记录在此文件。
 
+## [0.4.0] - 2026-08-30
+
+spawn 硬化(perm-boundary-p2 交付;背景:p1 建立的 per-role 工具行白名单存在残余洞——通用 subagent/subagent_fork 无过滤通道,p1 R2-AC5 一轮探针实证 56 工具全量泄漏,二轮修全)。
+
+- **通用 spawn 通道物理移除**:agent.cordis.yml 删除 tool-subagent(toolName: subagent)与 tool-subagent-fork 两行;preset 内不再存在无 toolFilter 的 spawn 工具行;coordinator 白名单去 subagent/subagent_fork(fork 非必需,续聊走 send_message;fork 过滤语义经 continuation.js L206/L652 核实)
+- **devhelper 带 filter 通道**(R2 选型 b):新增 tool-subagent-devhelper 行(toolFilter = dev 面减 spawn 权,无 subagent/send_message);dev 白名单去 subagent、加 subagent_devhelper;dev persona 指定用该工具名派助手
+- **白名单一致性审计制度化**(R4,b1 教训收口):project-roles.test.mjs 新增 5 组断言——角色 allow 与 per-role 行 toolFilter 逐条对照真实工具面基准(REAL_TOOL_SURFACE,按 R2-AC5 探针实测名单)+ FORBIDDEN 名单(bash/web_fetch/通用 spawn);b1 类「白名单引用不存在工具」从此被测试拦截
+- **R1 纪律文本沙箱事实修正**:workspaceNoteFor/MANUAL_TEXT 由「沙箱允许写整仓库」修正为「可写根=会话 cwd(pipeline-ws),生产路径实际写不进」(实证:i5/p2 两次 Access denied;tester 越界探针就地关闭 p1 R1-AC4)
+- **spawn 纪律段**:MANUAL_TEXT 增补;intake persona 指定 subagent_coordinator;coordinator persona 简化(机制保证后纪律从简)
+- 测试 49→64(一致性断言 5 组+角色用例);单测 290/290 全仓绿(含 host-plugins)
+
 ## [0.3.1] - 2026-08-30
 
 流程补丁(project-pipeline-fix-031 交付):多项目调度与重启决策。
