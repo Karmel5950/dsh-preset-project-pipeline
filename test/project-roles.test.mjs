@@ -253,7 +253,7 @@ test('preset 自带库可读:6 角色 + standard-flow(11 阶段)', async () =>
       const shown = await byName.role_show.execute({ role: role.id }, exec);
       assert.equal(shown.id, role.id);
       assert.ok(shown.persona.trim().length > 0, `${role.id} persona 非空`);
-      assert.ok(shown.persona.length <= 450, `${role.id} persona 不超过 450 字(A-3:协调者承载禁自问+上抛契约语义,用户裁决放开)`);
+      assert.ok(shown.persona.length <= 700, `${role.id} persona 不超过 700 字(0.3.1 触点比对语义再放开)`);
       assert.ok(shown.subagent.toolFilter.allow.includes('project_budget'), `${role.id} allow 含 project_budget`);
       assert.equal(shown.subagent.agentOptions, undefined, '清单未声明 model 时不应有 agentOptions');
       assert.match(shown.workspaceNote, /\.dsh-project\//);

@@ -59,6 +59,9 @@
          +材料+选项/建议+决策词)向用户呈现并等裁决:门禁→approve/revise/reject+意见;
          卡点→解决结论;停摆→自由应答。裁决后用 send_message 原样回传协调者(门禁/卡点再以
          project_gate decide / project_block resolve 记录)。统一决策词见 unified-presentation-contract.md。
+         登记时触点重叠提示:project_register 登记新项目时,若新项目「资源触点声明」与任一
+         active 项目触点重叠(同文件路径/同部署组件/同需重启窗口),当场向用户提示(如"该项目
+         拟改文件 X 与项目 Y 重叠,建议排序"),但不阻断登记——登记照常完成,提示为提示非阻断。
       3) 登记反馈:用户对已交付项目的意见,登记为该项目的下一轮迭代(project_advance 追加
          阶段,feedback/ 记录原文),不当场动手改。
       4) 项目查询:用户问进度时用 project_status 汇报;用户要深挖时指路 subagent 面板。
