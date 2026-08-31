@@ -1338,3 +1338,37 @@ test('advance 联动 collect:sibling REGISTRY 读取失败按非致命处理(C2)
   assert.equal(result.collected.ok, true, 'collect 仍成功');
   assert.ok(result.collected.note && result.collected.note.includes('bad-sibling'), 'note 说明跳过的 sibling');
 });
+
+test('advance 联动 collect:≥2 项目登记的会话判定共享,不进项目账本(readFile 回归)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const projcacheFile = await writeProjcache(workspace, {
+    'dev-sess': { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    'other-sess': { uncachedInputTokens: 500, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    'coord-sess': { uncachedInputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  });
+  const ctx = await mountPlugin({ projcachePath: projcacheFile });
+  const context = sessionContext(workspace, 'coord-sess');
+  await getTool(ctx, 'project_register').execute({ title: 'Shared', requirement: 'r', flowTemplate: 'mini-flow' }, sessionContext(workspace, 'intake-sess'));
+  // 造合法 sibling REGISTRY:dev-sess 也登记在 sibling 项目 → ≥2 项目登记 = 共享会话。
+  await mkdir(join(workspace, 'sibling-proj', '.dsh-project'), { recursive: true });
+  await writeFile(
+    join(workspace, 'sibling-proj', '.dsh-project', 'REGISTRY.json'),
+    JSON.stringify({ state: 'active', sessions: { 'dev-sess': { role: 'dev', capturePath: 'auto-record' } } }),
+    'utf8',
+  );
+  const result = await getTool(ctx, 'project_advance').execute({
+    projectId: 'shared',
+    sessions: [
+      { sessionId: 'other-sess', role: 'tester' },
+      { sessionId: 'dev-sess', role: 'dev' },
+    ],
+  }, context);
+  assert.equal(result.collected.ok, true, 'collect 成功(sibling 扫描不因 readFile 未定义失败)');
+  assert.ok(!result.collected.note || !result.collected.note.includes('readFile'), 'note 不含 readFile 未定义错误');
+  const book = await readJson(registryPaths(workspace, 'shared').budgetFile);
+  const runtime = book.committed.filter((e) => e.source === 'runtime-events');
+  assert.deepEqual(runtime.map((e) => e.role).sort(), ['coordinator', 'tester'], 'dev-sess(≥2 项目=共享)不进账本');
+  const tester = runtime.find((e) => e.role === 'tester');
+  assert.equal(tester.usage.tokens, 550, 'tester 桶 = 500+50');
+});

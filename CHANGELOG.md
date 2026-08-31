@@ -13,6 +13,7 @@
 - **host 看板(project-hub)**:computeTotals/budgetSummary/aggregateBudget 对 runtime-events 条目按桶数值求和(byRole[role] = { count, tokens } + totalTokens),工作区级含 sharedOnce;看板预算列/预算 tab/工作区汇总呈现真实 token 总量;i18n 增 totalTokens/sharedOnce 键;host 侧同款 projcache 读取与守卫。
 - **coordinator persona**:移除「每阶段 budget 上报」(自动归集取代),增「advance 时传 spawn 返回的 subagentId 登记会话」;694 字符(≤700)。
 - 容差声明:runtime-events 数字反映 collect 时刻 projcache 检查点快照(检查点延迟实测 ≤1.7h),project_status 输出附来源说明。
+- 交付门禁轮修复:collect 的 sibling REGISTRY 扫描 `readFile is not defined`(未 import 的异步版)→ 改 `readFileSync`,「≥2 项目登记=共享」判定恢复生效;补回归测试(共享会话不进项目账本)。
 - 版本 0.7.0 → **0.8.0(minor)**:BUDGET_SOURCES 枚举不动(复用预留的 'runtime-events' 口径)= 能力新增
 
 ## [0.7.0] - 2026-08-31

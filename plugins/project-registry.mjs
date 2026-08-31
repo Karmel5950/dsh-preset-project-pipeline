@@ -428,7 +428,7 @@ function makeApi({ cfg, presetDir, logger }) {
       const regFile = join(workspaceDir, sid, cfg.registryDir, 'REGISTRY.json');
       let sibling;
       try {
-        sibling = JSON.parse(await readFile(regFile, 'utf8'));
+        sibling = JSON.parse(readFileSync(regFile, 'utf8'));
       } catch (error) {
         notes.push(`跳过 sibling ${sid}(REGISTRY 读取失败:${error?.code ?? error?.message ?? error})`);
         continue;
