@@ -2,6 +2,16 @@
 
 本 preset 的全部显著变更记录在此文件。
 
+## [0.7.0] - 2026-08-31
+
+看板搜索/筛选 + 项目操作(归档/置顶)写路径(project-hub-i8 交付;背景:看板项目多时找项目难,且归档/置顶这类展示层语义无处安放——登记簿状态机语义不可动,需开一个窄写面)。
+
+- **看板搜索/筛选(纯前端受控状态)**:project-hub 看板新增搜索框(按 title 中文 + id 英文模糊匹配,大小写不敏感,输入即过滤,× 清空)+ 状态筛选 chips(active/delivered/rejected/parked 多选,与搜索 AND 叠加)+ 「已归档」toggle;空态「无匹配项目」+ 清空指引。全部为 React useState 受控,不触发 refetch(AC-S1~S5/F1~F5/E1~E2/C1~C2)。
+- **归档/置顶(展示层标记 + 写端点)**:新增唯一写面 = workspace 级 board view config(`<scanRoot>/board-view.json`,形状 `{ items: { "<id>": { pinned, archived } } }`),REGISTRY.json 保持严格只读。看板行内操作按钮(置顶/归档,stopPropagation 不误触导航),乐观更新 + 写端点落盘,失败回滚 + 提示。排序优先级:用户置顶 > active 置顶,置顶间 updatedAt 倒序(AC-A1~A5/P1~P5)。
+- **后端写端点 + 安全护栏**:project-hub.mjs 新增 `readBoardViewConfig`/`writeBoardViewConfig`(原子写:临时文件 + rename)/`applyBoardChange`(幂等 set/clear)纯函数;通道扩展 GET `?view=board` + PUT `{ board: { id, archived?, pinned? } }`。安全护栏 AC-W1~W7:白名单字段 / 固定路径 / 无越权写(只写 board-view.json)/ id 存在校验 / 幂等 / 并发(last-write-wins,无数据损坏)/ 读容错(缺失/坏 JSON → 空配置)。
+- 版本 0.6.0 → **0.7.0(minor)**:搜索/筛选/归档/置顶/写端点 = 能力新增
+- 测试:host-plugin project-hub.test.mjs 增 board view config 读写 + PUT board 写端点护栏(W1~W7)用例;新增 client.test.mjs(浏览器半面纯函数 filterProjects/applyBoardView/applyBoardChange/sortProjects 提取 eval 单测,覆盖搜索中英文/筛选逐态/叠加/空态/归档/置顶/排序)。
+
 ## [0.5.0] - 2026-08-30
 
 自成长四机制增强(pipeline-selfgrowth 交付;背景:确认型卡点重复消耗、失败模式靠人发现、perm-boundary-p1 的 STALE 事故、用户提了但不想现在做的需求无处安放)。
