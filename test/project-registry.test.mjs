@@ -6,6 +6,9 @@
 // 0.5.0 新增:机制4 暂存区 parking 状态机/register 单测(见「parked 暂存区」节)。
 // 0.5.1 新增(迭代7 中文命名):register 解耦单测——纯中文无 id 拒收、显式 id 合法/
 // 非法、混合 title 向后兼容、分隔符与 ".." 拒绝;slugifyStrict 纯函数单测。
+// 0.8.0 新增(预算账本改真实 token 计量):会话登记(主路 spawn-pass + 兜底 auto-record)、
+// commit 自动填(usage 缺省 + source=runtime-events)、advance 联动 collect、projcache
+// 守卫报错、R2 替换后同一 sessionId 不重复计数。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
@@ -38,8 +41,10 @@ async function makeWorkspace(t) {
   return dir;
 }
 
-/** 会话 cwd 注入:按调研结论,execute 第二参携带 agent.session.header.cwd。 */
-const sessionContext = (workspace) => ({ agent: { session: { header: { cwd: workspace } } } });
+/** 会话 cwd 注入:按调研结论,execute 第二参携带 agent.session.header.cwd;0.8.0 增 id。 */
+const sessionContext = (workspace, sessionId) => ({
+  agent: { session: { header: { cwd: workspace, ...(sessionId ? { id: sessionId } : {}) } } },
+});
 
 async function mountPlugin(config = {}) {
   const ctx = makeStubCtx();
@@ -113,6 +118,20 @@ async function advanceTo(t, ctx, workspace, projectId, targetIndex) {
   }
 }
 
+/** 写一份合法 projcache(unit.version=3)。 */
+async function writeProjcache(workspace, sessions) {
+  const file = join(workspace, 'projcache.json');
+  await writeJson(file, {
+    unit: { version: 3 },
+    tables: {
+      sessions: Object.fromEntries(
+        Object.entries(sessions).map(([sid, totals]) => [sid, { rows: { tokenUsage: { val: { totals } } } }]),
+      ),
+    },
+  });
+  return file;
+}
+
 // ── 插件元数据与挂载 ────────────────────────────────────────────────────────
 
 test('插件元数据:6 个工具 + 1 条手册提示段(注册常驻,不接线 ctx.effect)', async () => {
@@ -131,17 +150,21 @@ test('插件元数据:6 个工具 + 1 条手册提示段(注册常驻,不接线 
   const section = ctx.systemPrompt.items[0];
   assert.equal(section.name, 'project-pipeline/manual');
   assert.equal(section.order, 140);
-  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked', 'id 入参']) {
+  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked', 'id 入参', 'runtime-events', 'projcache', 'sessions']) {
     assert.ok(section.text.includes(word), `手册段应包含 ${word}`);
   }
 });
 
-test('config 校验:registryDir/libraryDir 非法时挂载即失败(fail-fast)', async () => {
+test('config 校验:registryDir/libraryDir 非法时挂载即失败(fail-fast);projcachePath 合法', async () => {
   await assert.rejects(() => mountPlugin({ registryDir: '' }), /registryDir/);
   await assert.rejects(() => mountPlugin({ registryDir: 'a/b' }), /registryDir/);
   await assert.rejects(() => mountPlugin({ registryDir: '..' }), /registryDir/);
   await assert.rejects(() => mountPlugin({ libraryDir: 42 }), /libraryDir/);
   await assert.rejects(() => mountPlugin({ wat: 1 }), /未知键/);
+  await assert.rejects(() => mountPlugin({ projcachePath: '' }), /projcachePath/);
+  await assert.rejects(() => mountPlugin({ projcachePath: 42 }), /projcachePath/);
+  // 合法 projcachePath(路径,可含分隔符)
+  await mountPlugin({ projcachePath: 'C:\\data\\session_projcache.json' });
 });
 
 test('每个工具都有对象根 output.schema、render 与非空中文 description', async () => {
@@ -1115,4 +1138,203 @@ test('parked:gate/block 对 parked 项目 assertActive 拒绝(AC-m4-t2)', async 
   assert.equal(budget.totals.entries, 0);
   const detail = await getTool(ctx, 'project_status').execute({ projectId: 'parked-gate' }, context);
   assert.equal(detail.project.state, 'parked');
+});
+
+// ── 0.8.0 真实 token 计量:会话登记 / commit 自动填 / advance 联动 collect ──
+
+test('会话登记:register 记 intake(auto-record);advance 记 coordinator(auto-record)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace, 'intake-sess');
+  await getTool(ctx, 'project_register').execute({ title: 'Sess Demo', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  const paths = registryPaths(workspace, 'sess-demo');
+  let registry = await readJson(paths.registryFile);
+  assert.equal(registry.sessions['intake-sess'].role, 'intake', 'register 记 intake');
+  assert.equal(registry.sessions['intake-sess'].capturePath, 'auto-record', '兜底路径 auto-record');
+  // advance 记 coordinator(auto-record)
+  await getTool(ctx, 'project_advance').execute({ projectId: 'sess-demo' }, sessionContext(workspace, 'coord-sess'));
+  registry = await readJson(paths.registryFile);
+  assert.equal(registry.sessions['coord-sess'].role, 'coordinator', 'advance 记 coordinator');
+  assert.equal(registry.sessions['coord-sess'].capturePath, 'auto-record');
+});
+
+test('会话登记:advance 传 sessions 记 spawn-pass(主路捕获)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace, 'coord-sess');
+  await getTool(ctx, 'project_register').execute({ title: 'Spawn Pass', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  await getTool(ctx, 'project_advance').execute({
+    projectId: 'spawn-pass',
+    sessions: [{ sessionId: 'dev-sess', role: 'dev' }, { sessionId: 'tester-sess', role: 'tester' }],
+  }, context);
+  const registry = await readJson(registryPaths(workspace, 'spawn-pass').registryFile);
+  assert.equal(registry.sessions['dev-sess'].role, 'dev');
+  assert.equal(registry.sessions['dev-sess'].capturePath, 'spawn-pass', '主路 spawn-pass');
+  assert.equal(registry.sessions['tester-sess'].role, 'tester');
+  assert.equal(registry.sessions['tester-sess'].capturePath, 'spawn-pass');
+  // sessions 参数校验:非法项拒绝
+  await assert.rejects(
+    () => getTool(ctx, 'project_advance').execute({ projectId: 'spawn-pass', sessions: [{ sessionId: 'x' }] }, context),
+    /sessions/,
+  );
+});
+
+test('commit 自动填:source=runtime-events 且 usage 缺省 → 按调用者会话 id 读 projcache 填四桶', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const projcacheFile = await writeProjcache(workspace, {
+    'dev-sess': { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  });
+  const ctx = await mountPlugin({ projcachePath: projcacheFile });
+  const context = sessionContext(workspace, 'dev-sess');
+  await getTool(ctx, 'project_register').execute({ title: 'Auto Fill', requirement: 'r', flowTemplate: 'mini-flow' }, sessionContext(workspace, 'intake-sess'));
+  const book = await getTool(ctx, 'project_budget').execute({
+    projectId: 'auto-fill',
+    action: 'commit',
+    entry: { stageId: 'do', role: 'dev', source: 'runtime-events' },
+  }, context);
+  assert.equal(book.committed.length, 1);
+  const entry = book.committed[0];
+  assert.equal(entry.source, 'runtime-events');
+  assert.deepEqual(entry.usage, {
+    tokens: 120,
+    uncachedInputTokens: 100,
+    outputTokens: 20,
+    sessionId: 'dev-sess',
+  });
+  assert.ok(entry.asOf, 'runtime-events 条目应带 asOf');
+  assert.ok(entry.projcacheMtime, 'runtime-events 条目应带 projcacheMtime');
+  // 会话登记:commit 记 entry.role(auto-record)
+  const registry = await readJson(registryPaths(workspace, 'auto-fill').registryFile);
+  assert.equal(registry.sessions['dev-sess'].role, 'dev');
+  assert.equal(registry.sessions['dev-sess'].capturePath, 'auto-record');
+});
+
+test('commit 自动填:projcache 版本守卫(≠3 中文报错不误解析)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const badFile = join(workspace, 'bad-projcache.json');
+  await writeJson(badFile, { unit: { version: 2 }, tables: {} });
+  const ctx = await mountPlugin({ projcachePath: badFile });
+  const context = sessionContext(workspace, 'dev-sess');
+  await getTool(ctx, 'project_register').execute({ title: 'Guard', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  await assert.rejects(
+    () => getTool(ctx, 'project_budget').execute({
+      projectId: 'guard',
+      action: 'commit',
+      entry: { stageId: 'do', role: 'dev', source: 'runtime-events' },
+    }, context),
+    /版本不支持.*仅支持 3/,
+  );
+});
+
+test('commit 自动填:调用者会话不在 projcache 表内 → 中文报错', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const projcacheFile = await writeProjcache(workspace, {
+    'other-sess': { uncachedInputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  });
+  const ctx = await mountPlugin({ projcachePath: projcacheFile });
+  const context = sessionContext(workspace, 'dev-sess');
+  await getTool(ctx, 'project_register').execute({ title: 'No Sess', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  await assert.rejects(
+    () => getTool(ctx, 'project_budget').execute({
+      projectId: 'no-sess',
+      action: 'commit',
+      entry: { stageId: 'do', role: 'dev', source: 'runtime-events' },
+    }, context),
+    /不在 projcache 表内/,
+  );
+});
+
+test('advance 联动 collect:重算私有会话真实 tokenUsage 按角色分桶写 committed(runtime-events)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const projcacheFile = await writeProjcache(workspace, {
+    'dev-sess': { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    'coord-sess': { uncachedInputTokens: 300, outputTokens: 40, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  });
+  const ctx = await mountPlugin({ projcachePath: projcacheFile });
+  const context = sessionContext(workspace, 'coord-sess');
+  await getTool(ctx, 'project_register').execute({ title: 'Collect', requirement: 'r', flowTemplate: 'mini-flow' }, sessionContext(workspace, 'intake-sess'));
+  // advance 传 dev 会话(spawn-pass);coordinator 会话经 auto-record 已登记。
+  const result = await getTool(ctx, 'project_advance').execute({
+    projectId: 'collect',
+    sessions: [{ sessionId: 'dev-sess', role: 'dev' }],
+  }, context);
+  assert.equal(result.collected.ok, true, 'collect 应成功');
+  const book = await readJson(registryPaths(workspace, 'collect').budgetFile);
+  const runtime = book.committed.filter((e) => e.source === 'runtime-events');
+  // intake 会话(共享)不进账本;dev + coordinator 私有会话按角色分桶。
+  assert.equal(runtime.length, 2, 'dev + coordinator 两桶');
+  const dev = runtime.find((e) => e.role === 'dev');
+  const coord = runtime.find((e) => e.role === 'coordinator');
+  assert.equal(dev.usage.tokens, 120, 'dev 桶 = 100+20');
+  assert.equal(coord.usage.tokens, 340, 'coordinator 桶 = 300+40');
+  assert.ok(dev.asOf && dev.projcacheMtime, 'collect 条目应带 asOf/projcacheMtime');
+});
+
+test('advance 联动 collect:R2 替换语义——移除全部 runtime-events 条目重写,同一 sessionId 不重复计数', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const projcacheFile = await writeProjcache(workspace, {
+    'dev-sess': { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  });
+  const ctx = await mountPlugin({ projcachePath: projcacheFile });
+  const context = sessionContext(workspace, 'dev-sess');
+  await getTool(ctx, 'project_register').execute({ title: 'R2', requirement: 'r', flowTemplate: 'mini-flow' }, sessionContext(workspace, 'intake-sess'));
+  // A:commit 自动填一条 runtime-events(dev-sess, tokens=120)
+  await getTool(ctx, 'project_budget').execute({
+    projectId: 'r2',
+    action: 'commit',
+    entry: { stageId: 'do', role: 'dev', source: 'runtime-events' },
+  }, context);
+  let book = await readJson(registryPaths(workspace, 'r2').budgetFile);
+  assert.equal(book.committed.filter((e) => e.source === 'runtime-events').length, 1, 'A 写入一条');
+  // advance 触发 collect:R2 替换,移除 A 条目重写为 dev 桶一条。
+  await getTool(ctx, 'project_advance').execute({
+    projectId: 'r2',
+    sessions: [{ sessionId: 'dev-sess', role: 'dev' }],
+  }, context);
+  book = await readJson(registryPaths(workspace, 'r2').budgetFile);
+  const runtime = book.committed.filter((e) => e.source === 'runtime-events');
+  assert.equal(runtime.length, 1, 'R2 替换后仅一条 runtime-events(dev 桶)');
+  assert.equal(runtime[0].role, 'dev');
+  assert.equal(runtime[0].usage.tokens, 120, '同一 sessionId 只计一次,不双重计数(120 而非 240)');
+});
+
+test('advance 联动 collect:projcache 缺失/读失败 → 非致命,advance 照常推进,note 说明', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  // 显式给一个不存在的 projcachePath → collect 非致命跳过(不依赖 DSH_HOME 是否设置)。
+  const ctx = await mountPlugin({ projcachePath: join(workspace, 'missing-projcache.json') });
+  const context = sessionContext(workspace, 'coord-sess');
+  await getTool(ctx, 'project_register').execute({ title: 'No Cache', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  const result = await getTool(ctx, 'project_advance').execute({ projectId: 'no-cache' }, context);
+  assert.equal(result.stageIndex, 1, 'advance 照常推进');
+  assert.equal(result.collected.ok, false, 'collect 非致命失败');
+  assert.ok(result.collected.note, 'note 说明原因');
+});
+
+test('advance 联动 collect:sibling REGISTRY 读取失败按非致命处理(C2),不阻断 advance', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const projcacheFile = await writeProjcache(workspace, {
+    'dev-sess': { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  });
+  const ctx = await mountPlugin({ projcachePath: projcacheFile });
+  const context = sessionContext(workspace, 'coord-sess');
+  await getTool(ctx, 'project_register').execute({ title: 'Main', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  // 造一个坏 sibling REGISTRY(坏 JSON)
+  await mkdir(join(workspace, 'bad-sibling', '.dsh-project'), { recursive: true });
+  await writeFile(join(workspace, 'bad-sibling', '.dsh-project', 'REGISTRY.json'), '{bad', 'utf8');
+  const result = await getTool(ctx, 'project_advance').execute({
+    projectId: 'main',
+    sessions: [{ sessionId: 'dev-sess', role: 'dev' }],
+  }, context);
+  assert.equal(result.stageIndex, 1, 'advance 照常推进,不被坏 sibling 阻断');
+  assert.equal(result.collected.ok, true, 'collect 仍成功');
+  assert.ok(result.collected.note && result.collected.note.includes('bad-sibling'), 'note 说明跳过的 sibling');
 });

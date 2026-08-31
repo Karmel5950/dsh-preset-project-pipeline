@@ -14,9 +14,14 @@
 //   - slugifyStrict(title):复用 slugify 内部清洗逻辑,当 slugify 会回退到
 //     'project-<YYYYMMDD>' 前缀时返回 null(register 层据此拒收纯中文标题并提示提供 id)。
 //     slugify 本身不改(保持返回日期前缀,向后兼容其他调用方与既有测试)。
+// 0.8.0 新增(预算账本改真实 token 计量,2026-08-31):
+//   - readProjcache(file):读 projcache 检查点文件 + 守卫 unit.version(≠3 中文报错不误解析);
+//   - sessionTokenUsage(projcache, sessionId):取单会话 tokenUsage(有效计费口径);
+//   - aggregateByRole(sessions, projcache):按 REGISTRY.sessions 角色桶聚合 tokenUsage。
+//     零 npm import;可单测(注入临时 projcache 文件)。
 
 import { readFileSync, readdirSync } from 'node:fs';
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join } from 'node:path';
 
 /** 阶段类型词汇表(框架的强约束;扩类型 = 模板 semver minor,改语义 = major)。 */
@@ -546,4 +551,82 @@ export function buildFailureReport(aggregation) {
     cases: item.cases,
     advice: FAILURE_MECHANISM_ADVICE[item.category] ?? '人工研判',
   }));
+}
+
+// ── 真实 token 计量(预算账本改真实 token,2026-08-31)──────────────────────
+// 数据源 = projcache 检查点文件($DSH_HOME/storages/session_projcache.json,
+// unit.version=3)。有效计费口径 = uncachedInputTokens + outputTokens
+// (cacheRead/cacheWrite 在 DeepSeek 路由下恒 0,主线程实测)。
+// 零 npm import;读文件走 node:fs/promises;可单测(注入临时 projcache 文件)。
+
+/**
+ * 读 projcache 文件并守卫 unit.version(AC-M3)。
+ * version===3 → 按已知结构解析;缺失或 ≠3 → 明确中文报错,不误解析。
+ * 返回 { data, mtime }(mtime 为文件修改时间 ISO 串,供复核;读不到 → null)。
+ */
+export async function readProjcache(file) {
+  let text;
+  try {
+    text = await readFile(file, 'utf8');
+  } catch (error) {
+    throw new Error(`读取 projcache 失败:${error?.code ?? error?.message ?? error}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`projcache 不是合法 JSON:${file}`);
+  }
+  if (parsed === null || typeof parsed !== 'object' || parsed.unit?.version !== 3) {
+    throw new Error(`projcache 版本不支持(unit.version=${JSON.stringify(parsed?.unit?.version)},仅支持 3),不误解析:${file}`);
+  }
+  let mtime = null;
+  try {
+    const st = await stat(file);
+    mtime = st.mtime.toISOString();
+  } catch {
+    mtime = null;
+  }
+  return { data: parsed, mtime };
+}
+
+/**
+ * 取单会话 tokenUsage(有效计费口径 = uncachedInputTokens + outputTokens)。
+ * 会话不在表内 / 结构缺失 → null。返回 { uncachedInputTokens, outputTokens,
+ * cacheReadTokens, cacheWriteTokens }。
+ */
+export function sessionTokenUsage(projcache, sessionId) {
+  if (projcache === null || typeof projcache !== 'object') return null;
+  const totals = projcache?.tables?.sessions?.[sessionId]?.rows?.tokenUsage?.val?.totals;
+  if (totals === null || typeof totals !== 'object') return null;
+  const num = (v) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+  return {
+    uncachedInputTokens: num(totals.uncachedInputTokens),
+    outputTokens: num(totals.outputTokens),
+    cacheReadTokens: num(totals.cacheReadTokens),
+    cacheWriteTokens: num(totals.cacheWriteTokens),
+  };
+}
+
+/**
+ * 按 REGISTRY.sessions 的角色桶聚合 tokenUsage。
+ * sessions = { [sessionId]: { role } };projcache = readProjcache 的 data。
+ * 返回 { [role]: { tokens, uncachedInputTokens, outputTokens, sessionCount } }。
+ * 会话不在 projcache 表内 → 跳过(不计数)。
+ */
+export function aggregateByRole(sessions, projcache) {
+  const out = {};
+  if (sessions === null || typeof sessions !== 'object') return out;
+  for (const [sessionId, meta] of Object.entries(sessions)) {
+    const role = meta?.role;
+    if (typeof role !== 'string' || role.length === 0) continue;
+    const usage = sessionTokenUsage(projcache, sessionId);
+    if (usage === null) continue;
+    const bucket = out[role] ?? (out[role] = { tokens: 0, uncachedInputTokens: 0, outputTokens: 0, sessionCount: 0 });
+    bucket.tokens += usage.uncachedInputTokens + usage.outputTokens;
+    bucket.uncachedInputTokens += usage.uncachedInputTokens;
+    bucket.outputTokens += usage.outputTokens;
+    bucket.sessionCount += 1;
+  }
+  return out;
 }

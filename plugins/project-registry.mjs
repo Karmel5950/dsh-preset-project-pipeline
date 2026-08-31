@@ -30,6 +30,15 @@
 //   - register 解耦:新增可选 id 入参(显式英文 slug),title 自由中文;纯中文 title 无
 //     显式 id 时拒收并提示提供 id(不引入拼音依赖);混合 title 维持现状 slugify(向后兼容)。
 //   - 工具 schema 增 id 属性;MANUAL_TEXT 工具速查补 id 说明。
+// 0.8.0 新增(预算账本改真实 token 计量,2026-08-31):
+//   - 会话登记(主备两路):主=advance 传 sessions:[{sessionId,role}](spawn-pass);
+//     备=角色首调 project 工具自动记(auto-record,按调用类型推断角色)。
+//   - A:project_budget commit 允许 source='runtime-events' 且 usage 缺省 → 按调用者
+//     会话 id 读 projcache 自动填四桶(真实 token)。
+//   - B:advance 结算联动自动归集(幂等+非致命):重算本项目私有会话真实 tokenUsage
+//     按角色分桶写 committed(source=runtime-events);R2 替换语义(移除全部 runtime-events
+//     条目重写,同一 sessionId 不双重计数);intake 及共享会话只进工作区级 sharedOnce。
+//   - config 增 projcachePath(显式优先)+ env DSH_HOME 回退;读时守卫 unit.version。
 
 import { existsSync, readFileSync } from 'node:fs';
 import { appendFile, mkdir, readdir, writeFile } from 'node:fs/promises';
@@ -38,9 +47,12 @@ import { fileURLToPath } from 'node:url';
 import {
   BUDGET_SOURCES,
   STAGE_TYPES,
+  aggregateByRole,
   readJson,
+  readProjcache,
   registryPaths,
   resolveLibrary,
+  sessionTokenUsage,
   slugify,
   slugifyStrict,
   validateStageList,
@@ -104,12 +116,12 @@ function stageBrief(stage, index) {
   };
 }
 
-/** config fail-fast:registryDir / libraryDir 均为单级非空目录名,未知键报错。 */
+/** config fail-fast:registryDir / libraryDir 均为单级非空目录名,projcachePath 为路径,未知键报错。 */
 function normalizeConfig(config = {}) {
-  const cfg = { registryDir: '.dsh-project', libraryDir: '.dsh-library' };
+  const cfg = { registryDir: '.dsh-project', libraryDir: '.dsh-library', projcachePath: undefined };
   for (const key of Object.keys(config ?? {})) {
-    if (key !== 'registryDir' && key !== 'libraryDir') {
-      throw new Error(`${name}: config 含未知键 "${key}"(仅支持 registryDir/libraryDir)`);
+    if (key !== 'registryDir' && key !== 'libraryDir' && key !== 'projcachePath') {
+      throw new Error(`${name}: config 含未知键 "${key}"(仅支持 registryDir/libraryDir/projcachePath)`);
     }
   }
   for (const key of ['registryDir', 'libraryDir']) {
@@ -123,7 +135,21 @@ function normalizeConfig(config = {}) {
     }
     cfg[key] = value;
   }
+  if (config?.projcachePath !== undefined) {
+    if (typeof config.projcachePath !== 'string' || config.projcachePath.trim().length === 0) {
+      throw new Error(`${name}: config.projcachePath 必须是非空字符串(projcache 检查点文件绝对路径)`);
+    }
+    cfg.projcachePath = config.projcachePath;
+  }
   return cfg;
+}
+
+/** projcache 路径:显式 config 优先,env DSH_HOME 回退;都没有 → null。 */
+function projcachePath(cfg) {
+  if (typeof cfg.projcachePath === 'string' && cfg.projcachePath.length > 0) return cfg.projcachePath;
+  const home = process.env.DSH_HOME;
+  if (typeof home === 'string' && home.length > 0) return join(home, 'storages', 'session_projcache.json');
+  return null;
 }
 
 /** 会话工作区:见文件头调研结论;拿不到就报中文错,不做 process.cwd() 兜底。 */
@@ -133,6 +159,30 @@ function sessionWorkspace(context) {
     throw new Error(`${name}: 无法确定会话工作区(执行上下文缺少 agent.session.header.cwd;本工具须由会话内的模型调用)`);
   }
   return cwd;
+}
+
+/** 会话 id(硬归属):工具 execute 第二参 context.agent.session.header.id。 */
+function sessionIdOf(context) {
+  return context?.agent?.session?.header?.id;
+}
+
+/**
+ * 会话登记(REGISTRY.sessions)。主备两路共用:
+ * - 主路 spawn-pass:协调者 advance 时显式传 spawn 返回的 subagentId;
+ * - 兜底 auto-record:角色首调 project 工具自动记(按调用类型推断角色)。
+ * 已登记会话保留首见 role(避免角色漂移),仅刷新 lastSeenAt。
+ * 返回是否写入(会话 id 合法即 true)。
+ */
+function recordSession(registry, sessionId, role, capturePath, now) {
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return false;
+  if (!isPlainObject(registry.sessions)) registry.sessions = {};
+  const existing = registry.sessions[sessionId];
+  if (existing && typeof existing === 'object') {
+    existing.lastSeenAt = now;
+    return true;
+  }
+  registry.sessions[sessionId] = { role, capturePath, firstSeenAt: now, lastSeenAt: now };
+  return true;
 }
 
 /** projectId 路径安全:任何工具入口先过 slug 卫兵,拒绝分隔符与 ".."。 */
@@ -344,6 +394,97 @@ function makeApi({ cfg, presetDir, logger }) {
     await writeFile(file, text, 'utf8');
   }
 
+  /**
+   * B:advance 结算联动自动归集(幂等 + 非致命,不新增 action)。
+   * 重算本项目私有会话真实 tokenUsage 按角色分桶写 committed(source=runtime-events);
+   * R2 替换语义:移除全部 runtime-events 条目(含 A 写入的)重写,同一 sessionId 不双重计数。
+   * 共享会话(role='intake' 或 ≥2 项目登记)不进本项目账本(进工作区级 sharedOnce)。
+   * sibling REGISTRY 读取失败按非致命处理(C2),跳过并在 note 说明,不阻断 advance。
+   * 返回 { ok, buckets, note? }。
+   */
+  async function collectRuntimeEvents({ workspaceDir, projectId, paths, registry }) {
+    const projcacheFile = projcachePath(cfg);
+    if (projcacheFile === null) {
+      return { ok: false, buckets: {}, note: '未配置 projcachePath 且无 DSH_HOME,跳过归集' };
+    }
+    // 1. 扫全部项目 REGISTRY.sessions(含当前),统计会话被登记的项目数。
+    const sessionProjectCount = new Map();
+    const sessionRoles = new Map();
+    for (const [sid, meta] of Object.entries(registry.sessions ?? {})) {
+      sessionProjectCount.set(sid, (sessionProjectCount.get(sid) ?? 0) + 1);
+      sessionRoles.set(sid, meta?.role);
+    }
+    let entries;
+    try {
+      entries = await readdir(workspaceDir, { withFileTypes: true });
+    } catch {
+      entries = [];
+    }
+    const notes = [];
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const sid = entry.name;
+      if (sid === projectId) continue;
+      const regFile = join(workspaceDir, sid, cfg.registryDir, 'REGISTRY.json');
+      let sibling;
+      try {
+        sibling = JSON.parse(await readFile(regFile, 'utf8'));
+      } catch (error) {
+        notes.push(`跳过 sibling ${sid}(REGISTRY 读取失败:${error?.code ?? error?.message ?? error})`);
+        continue;
+      }
+      if (sibling === null || typeof sibling !== 'object' || !sibling.sessions) continue;
+      for (const s of Object.keys(sibling.sessions)) {
+        sessionProjectCount.set(s, (sessionProjectCount.get(s) ?? 0) + 1);
+      }
+    }
+    // 2. 判定共享会话:role='intake' 或 ≥2 项目登记。
+    const shared = new Set();
+    for (const [sid, count] of sessionProjectCount) {
+      if (sessionRoles.get(sid) === 'intake' || count >= 2) shared.add(sid);
+    }
+    // 3. 私有会话 = 本项目 sessions 中非共享者。
+    const privateSessions = {};
+    for (const [sid, meta] of Object.entries(registry.sessions ?? {})) {
+      if (shared.has(sid)) continue;
+      privateSessions[sid] = meta;
+    }
+    // 4. 读 projcache(守卫 unit.version)。
+    let projcache;
+    try {
+      projcache = await readProjcache(projcacheFile);
+    } catch (error) {
+      return { ok: false, buckets: {}, note: `projcache 读取失败,跳过归集:${error?.message ?? error}` };
+    }
+    // 5. 按角色聚合。
+    const buckets = aggregateByRole(privateSessions, projcache.data);
+    // 6. R2 替换:移除全部 runtime-events 条目,重写每桶一条(含 asOf/projcacheMtime)。
+    const budgetBook = await readJson(paths.budgetFile);
+    if (!Array.isArray(budgetBook.committed)) budgetBook.committed = [];
+    const kept = budgetBook.committed.filter((e) => e?.source !== 'runtime-events');
+    const now = new Date().toISOString();
+    for (const [role, bucket] of Object.entries(buckets)) {
+      kept.push({
+        at: now,
+        iteration: registry.iteration,
+        stageId: 'collect',
+        role,
+        usage: {
+          tokens: bucket.tokens,
+          uncachedInputTokens: bucket.uncachedInputTokens,
+          outputTokens: bucket.outputTokens,
+          sessionCount: bucket.sessionCount,
+        },
+        source: 'runtime-events',
+        asOf: now,
+        projcacheMtime: projcache.mtime,
+      });
+    }
+    budgetBook.committed = kept;
+    await writeJson(paths.budgetFile, budgetBook);
+    return { ok: true, buckets, note: notes.length > 0 ? notes.join('; ') : undefined };
+  }
+
   // 1. project_register ──────────────────────────────────────────────────────
   async function register(args, context) {
     const workspaceDir = sessionWorkspace(context);
@@ -420,6 +561,8 @@ function makeApi({ cfg, presetDir, logger }) {
       blockers: [],
       state: args.parked === true ? 'parked' : 'active',
     };
+    // 会话登记(兜底 auto-record):register 调用方 = intake。
+    recordSession(registry, sessionIdOf(context), 'intake', 'auto-record', now);
     const flow = { schemaVersion: 1, id: flowId, version: flowVersion, stages, source: flowSource, revision: 1 };
     const budget = { schemaVersion: 1, estimate: args.budgetEstimate ?? null, cap: null, committed: [] };
 
@@ -476,6 +619,22 @@ function makeApi({ cfg, presetDir, logger }) {
     assertRegistry(registry, paths.registryFile);
     const flow = await readJson(paths.flowFile);
     const stages = Array.isArray(flow.stages) ? flow.stages : [];
+
+    // 会话登记(兜底 auto-record):advance 调用方 = 协调者。
+    const now0 = new Date().toISOString();
+    recordSession(registry, sessionIdOf(context), 'coordinator', 'auto-record', now0);
+    // 主路 spawn-pass:协调者显式传 spawn 返回的 subagentId 登记会话。
+    if (args.sessions !== undefined) {
+      if (!Array.isArray(args.sessions)) {
+        throw new Error(`${name}/project_advance: sessions 必须是非空数组 [{ sessionId, role }]`);
+      }
+      for (const s of args.sessions) {
+        if (!isPlainObject(s) || !nonEmptyString(s.sessionId) || !nonEmptyString(s.role)) {
+          throw new Error(`${name}/project_advance: sessions 每项必须是 { sessionId, role }(非空字符串)`);
+        }
+        recordSession(registry, s.sessionId, s.role, 'spawn-pass', now0);
+      }
+    }
 
     // 机制4:parked 激活路径。parked 项目只能经 activate:true 激活(parked→active,
     // stageIndex=0/clarify),否则一律拒绝(不进入常规推进/结项)。
@@ -567,6 +726,13 @@ function makeApi({ cfg, presetDir, logger }) {
       registry.state = 'delivered';
       registry.updatedAt = now;
       await writeJson(paths.registryFile, registry);
+      // 结算联动 collect(幂等+非致命;结项也是结算点)。
+      let collected;
+      try {
+        collected = await collectRuntimeEvents({ workspaceDir, projectId, paths, registry });
+      } catch (error) {
+        collected = { ok: false, buckets: {}, note: `归集异常:${error?.message ?? error}` };
+      }
       return {
         stageIndex: curIndex,
         iteration: registry.iteration,
@@ -574,6 +740,7 @@ function makeApi({ cfg, presetDir, logger }) {
         journalPath: null,
         delivered: true,
         state: 'delivered',
+        collected,
       };
     }
 
@@ -589,6 +756,14 @@ function makeApi({ cfg, presetDir, logger }) {
     await writeJson(paths.registryFile, registry);
     if (flowChanged) await writeJson(paths.flowFile, flow);
 
+    // 结算联动 collect(幂等+非致命;advance 是唯一结算点)。
+    let collected;
+    try {
+      collected = await collectRuntimeEvents({ workspaceDir, projectId, paths, registry });
+    } catch (error) {
+      collected = { ok: false, buckets: {}, note: `归集异常:${error?.message ?? error}` };
+    }
+
     return {
       stageIndex: nextIndex,
       iteration: registry.iteration,
@@ -596,6 +771,7 @@ function makeApi({ cfg, presetDir, logger }) {
       journalPath,
       delivered: false,
       state: 'active',
+      collected,
     };
   }
 
@@ -607,6 +783,8 @@ function makeApi({ cfg, presetDir, logger }) {
     const registry = await readJson(paths.registryFile);
     assertRegistry(registry, paths.registryFile);
     assertActive(registry, projectId);
+    // 会话登记(兜底 auto-record):gate 调用方 = 协调者。
+    recordSession(registry, sessionIdOf(context), 'coordinator', 'auto-record', new Date().toISOString());
     const flow = await readJson(paths.flowFile);
     const stages = Array.isArray(flow.stages) ? flow.stages : [];
     if (!nonEmptyString(args?.stageId)) throw new Error(`${name}/project_gate: stageId 必填`);
@@ -675,7 +853,7 @@ function makeApi({ cfg, presetDir, logger }) {
       }
       const verdict = decision.verdict;
       if (!['approve', 'revise', 'reject'].includes(verdict)) {
-        throw new Error(`${name}/project_gate: decision.verdict 必须是 approve/revise/reject,得到 ${JSON.stringify(verdict ?? null)}`);
+        throw new Error(`${name}/project_gate: decision.verdict 必须是 approve/revise/reject,得到 ${JSON.stringify(decision.verdict ?? null)}`);
       }
       if (decision.comment !== undefined && typeof decision.comment !== 'string') {
         throw new Error(`${name}/project_gate: decision.comment 必须是字符串`);
@@ -735,19 +913,58 @@ function makeApi({ cfg, presetDir, logger }) {
       }
       if (!nonEmptyString(entry.stageId)) throw new Error(`${name}/project_budget: entry.stageId 必填`);
       if (!nonEmptyString(entry.role)) throw new Error(`${name}/project_budget: entry.role 必填`);
-      if (!isPlainObject(entry.usage)) throw new Error(`${name}/project_budget: entry.usage 必须是对象(形状自由,工具不解释)`);
       const source = entry.source ?? 'self-report';
       if (!BUDGET_SOURCES.includes(source)) {
         throw new Error(`${name}/project_budget: entry.source 必须是 ${BUDGET_SOURCES.join('/')} 之一,得到 ${JSON.stringify(entry.source)}`);
       }
-      budgetBook.committed.push({
+      // 会话登记(兜底 auto-record):commit 调用方 = entry.role。
+      recordSession(registry, sessionIdOf(context), entry.role, 'auto-record', new Date().toISOString());
+      // A:source='runtime-events' 且 usage 缺省 → 按调用者会话 id 读 projcache 自动填四桶。
+      let usage = entry.usage;
+      let asOf;
+      let projcacheMtime;
+      if (source === 'runtime-events' && usage === undefined) {
+        const projcacheFile = projcachePath(cfg);
+        if (projcacheFile === null) {
+          throw new Error(`${name}/project_budget: source=runtime-events 且 usage 缺省需要 projcache(未配置 projcachePath 且无 DSH_HOME)`);
+        }
+        const callerSession = sessionIdOf(context);
+        if (typeof callerSession !== 'string' || callerSession.length === 0) {
+          throw new Error(`${name}/project_budget: source=runtime-events 自动填桶需要调用者会话 id(执行上下文缺少 agent.session.header.id)`);
+        }
+        let projcache;
+        try {
+          projcache = await readProjcache(projcacheFile);
+        } catch (error) {
+          throw new Error(`${name}/project_budget: 读 projcache 失败,无法自动填桶:${error?.message ?? error}`);
+        }
+        const tu = sessionTokenUsage(projcache.data, callerSession);
+        if (tu === null) {
+          throw new Error(`${name}/project_budget: 调用者会话 ${callerSession} 不在 projcache 表内,无法自动填桶`);
+        }
+        usage = {
+          tokens: tu.uncachedInputTokens + tu.outputTokens,
+          uncachedInputTokens: tu.uncachedInputTokens,
+          outputTokens: tu.outputTokens,
+          sessionId: callerSession,
+        };
+        asOf = new Date().toISOString();
+        projcacheMtime = projcache.mtime;
+      } else if (!isPlainObject(usage)) {
+        throw new Error(`${name}/project_budget: entry.usage 必须是对象(形状自由,工具不解释)`);
+      }
+      const committedEntry = {
         at: new Date().toISOString(),
         iteration: registry.iteration,
         stageId: entry.stageId,
         role: entry.role,
-        usage: entry.usage,
+        usage,
         source,
-      });
+      };
+      if (asOf !== undefined) committedEntry.asOf = asOf;
+      if (projcacheMtime !== undefined) committedEntry.projcacheMtime = projcacheMtime;
+      budgetBook.committed.push(committedEntry);
+      await writeJson(paths.registryFile, registry);
     }
     await writeJson(paths.budgetFile, budgetBook);
     return {
@@ -842,6 +1059,8 @@ function makeApi({ cfg, presetDir, logger }) {
     const registry = await readJson(paths.registryFile);
     assertRegistry(registry, paths.registryFile);
     assertActive(registry, projectId);
+    // 会话登记(兜底 auto-record):block 调用方 = 协调者。
+    recordSession(registry, sessionIdOf(context), 'coordinator', 'auto-record', new Date().toISOString());
     if (!Array.isArray(registry.blockers)) registry.blockers = [];
     const action = args?.action;
 
@@ -976,6 +1195,8 @@ function budgetEntrySchema() {
       role: { type: 'string' },
       usage: { type: 'object' },
       source: { type: 'string' },
+      asOf: { type: 'string' },
+      projcacheMtime: { oneOf: [{ type: 'string' }, { type: 'null' }] },
     },
     required: ['at', 'iteration', 'stageId', 'role', 'usage', 'source'],
   };
@@ -1059,6 +1280,19 @@ const REGISTER_OUTPUT_SCHEMA = {
   required: ['projectId', 'projectDir', 'state', 'flowSummary', 'nextStage'],
 };
 
+function collectedSchema() {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      ok: { type: 'boolean' },
+      buckets: { type: 'object' },
+      note: { type: 'string' },
+    },
+    required: ['ok', 'buckets'],
+  };
+}
+
 const ADVANCE_OUTPUT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -1070,6 +1304,7 @@ const ADVANCE_OUTPUT_SCHEMA = {
     delivered: { type: 'boolean' },
     state: { type: 'string', enum: ['active', 'parked', 'delivered'] },
     activated: { type: 'boolean' },
+    collected: collectedSchema(),
   },
   required: ['stageIndex', 'iteration', 'stage', 'journalPath', 'delivered', 'state'],
 };
@@ -1151,9 +1386,9 @@ const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
 
 ### 工具速查(登记簿 6 + 库 4)
 1. project_register:登记新项目。title+requirement 必填;flowTemplate 选模板(默认 standard-flow)或给 flowStages 现场定制;可带 budgetEstimate;可带 parked(默认 false,true → state='parked' 入册不 spawn)。**中文 title 建议配显式 id 入参(格式 [a-z0-9-]+)**:提供 id 时 projectId=uniqueProjectId(workspaceDir, id),title 自由中文;纯中文 title 未提供 id 会拒收并提示提供 id(不引入拼音依赖);混合 title(含 ASCII 片段)未提供 id 维持现状 slugify。返回项目 id、state 与流程概要。
-2. project_advance:推进到下一阶段。**存在未解决卡点(project_block)会拒绝**;门禁 pending 会拒绝;**门禁未呈递(gateStatus=null)也会拒绝**——必须先 present 呈递并等用户裁决(2026-08-29 实测收紧:协调者曾未呈递直接穿过门禁);approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1);在最后阶段不给 appendStages = 结项(state→delivered,此后不可再推进)。**parked 项目只能经 activate:true 激活(parked→active,stageIndex=0),否则一律拒绝**。常规推进自动写 journal;结项不写 journal、返回 delivered:true。
+2. project_advance:推进到下一阶段。**存在未解决卡点(project_block)会拒绝**;门禁 pending 会拒绝;**门禁未呈递(gateStatus=null)也会拒绝**——必须先 present 呈递并等用户裁决(2026-08-29 实测收紧:协调者曾未呈递直接穿过门禁);approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1);在最后阶段不给 appendStages = 结项(state→delivered,此后不可再推进)。**parked 项目只能经 activate:true 激活(parked→active,stageIndex=0),否则一律拒绝**。常规推进自动写 journal;结项不写 journal、返回 delivered:true。**可带 sessions:[{sessionId,role}] 登记 spawn 返回的 subagentId(主路会话捕获)**;推进时自动归集本项目私有会话真实 tokenUsage 写 committed(source=runtime-events),返回 collected 状态。
 3. project_gate:门禁两步。present 把摘要/材料/建议写成门禁包并置 pending;decide 记录用户裁决(approve/revise/reject),revise 必给 reviseTo(流程中已有的 work 阶段 id),reject 使项目终态。
-4. project_budget:get 查账(含 totals);set-estimate / set-cap 设估算与上限;commit 逐阶段上报消耗(stageId/role/usage,source 默认 self-report)。
+4. project_budget:get 查账(含 totals);set-estimate / set-cap 设估算与上限;commit 逐阶段上报消耗(stageId/role/usage,source 默认 self-report)。**source='runtime-events' 且 usage 缺省时插件按调用者会话 id 读 projcache 自动填真实 token 四桶**。
 5. project_status:不带 projectId 列出工作区全部项目(含未解决卡点数);带 projectId 看单项目详情(当前阶段/门禁态/预算聚合/SUMMARY 是否存在/卡点数)。
 6. project_block:卡点通道(优先上报,禁止降级)。report 登记(category=五维可行性维度+other)并卡住推进;resolve 记录用户裁决结论后解卡;list 查看。
 7. role_list / role_show:查角色清单;role_show 返回可直接拷进 subagent 调用的参数(persona/toolFilter/agentOptions)与 workspaceNote。
@@ -1228,8 +1463,10 @@ SPEC(clarify 阶段)必须含「可行性分析」章,五维逐条给结论(可�
 跨压缩/跨重启恢复以 REGISTRY.json + FLOW.json + SUMMARY.md 为权威上下文,不依赖对话历史。
 
 ### 预算上报纪律
-每完成一个阶段,协调者(或角色)用 project_budget commit 上报该阶段消耗(stageId/role/usage),
-source 用默认 self-report;estimate/cap 形状自由,工具不解释其内容。usage 尽力而为,趋势参考即可。
+每完成一个阶段,协调者(或角色)用 project_budget commit 上报该阶段消耗(stageId/role/usage);
+source='runtime-events' 且 usage 缺省时插件按调用者会话 id 读 projcache 自动填真实 token 四桶。
+advance 结算联动自动归集:重算本项目私有会话真实 tokenUsage 按角色分桶写 committed(source=runtime-events),
+同一会话不双重计数;intake 及共享会话只进工作区级汇总(sharedOnce)。estimate/cap 形状自由,工具不解释其内容。
 
 ### 路径纪律
 - 一切项目文件都在 <workspace>/<projectId>/ 内;projectId 由标题清洗为 kebab slug,含路径分隔符或 ".." 的 id 一律拒绝。
@@ -1286,7 +1523,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register({
     name: 'project_advance',
-    description: '推进项目流程指针到下一阶段。门禁待裁决时拒绝;approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 指定的 work 阶段;在最后阶段给 appendStages 可开启新迭代。parked 项目只能经 activate:true 激活(parked→active,stageIndex=0),否则一律拒绝。每次推进自动写 journal 并刷新 REGISTRY.updatedAt。',
+    description: '推进项目流程指针到下一阶段。门禁待裁决时拒绝;approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 指定的 work 阶段;在最后阶段给 appendStages 可开启新迭代。parked 项目只能经 activate:true 激活(parked→active,stageIndex=0),否则一律拒绝。每次推进自动写 journal 并刷新 REGISTRY.updatedAt;可带 sessions:[{sessionId,role}] 登记 spawn 返回的 subagentId(主路会话捕获);推进时自动归集本项目私有会话真实 tokenUsage 写 committed(source=runtime-events),返回 collected 状态。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -1299,16 +1536,29 @@ export function apply(ctx, config = {}) {
           items: stageParamSchema(),
         },
         activate: { type: 'boolean', description: 'parked 项目激活用:true → parked→active,stageIndex=0(clarify);仅对 state=parked 项目生效。' },
+        sessions: {
+          type: 'array',
+          description: '主路会话捕获:协调者 spawn 角色后把返回的 subagentId 以 [{ sessionId, role }] 传入,插件写入 REGISTRY.sessions(capturePath=spawn-pass)。',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              sessionId: { type: 'string', description: 'spawn 返回的 subagentId。' },
+              role: { type: 'string', description: '该会话归属角色 id。' },
+            },
+            required: ['sessionId', 'role'],
+          },
+        },
       },
       required: ['projectId'],
     },
     output: {
       schema: ADVANCE_OUTPUT_SCHEMA,
       render: (args, value) => [{ type: 'text', text: value.delivered
-        ? `项目 ${args.projectId} 已交付结项(state=delivered,第 ${value.iteration} 次迭代;最后阶段 ${value.stage.id})。后续推进会被拒绝;开新迭代请登记反馈后用 appendStages。`
+        ? `项目 ${args.projectId} 已交付结项(state=delivered,第 ${value.iteration} 次迭代;最后阶段 ${value.stage.id})。后续推进会被拒绝;开新迭代请登记反馈后用 appendStages。${value.collected ? `归集:${value.collected.ok ? 'ok' : '跳过'}${value.collected.note ? `(${value.collected.note})` : ''}` : ''}`
         : value.activated
           ? `项目 ${args.projectId} 已激活(parked→active,state=active),从阶段 #${value.stageIndex + 1} ${value.stage?.id ?? ''}(${value.stage ? stageTypeLabel(value.stage.type) : ''})开始推进;请按 state=active spawn 协调者从 clarify 开始。`
-          : `项目 ${args.projectId} 推进到阶段 #${value.stageIndex + 1} ${value.stage.id}(${stageTypeLabel(value.stage.type)}${value.stage.role ? ` · ${value.stage.role}` : ''},第 ${value.iteration} 次迭代);日志:${value.journalPath}` }],
+          : `项目 ${args.projectId} 推进到阶段 #${value.stageIndex + 1} ${value.stage.id}(${stageTypeLabel(value.stage.type)}${value.stage.role ? ` · ${value.stage.role}` : ''},第 ${value.iteration} 次迭代);日志:${value.journalPath}${value.collected ? `;归集:${value.collected.ok ? 'ok' : '跳过'}${value.collected.note ? `(${value.collected.note})` : ''}` : ''}` }],
     },
     async execute(args, context) {
       return api.advance(args, context);
@@ -1359,7 +1609,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register({
     name: 'project_budget',
-    description: '项目预算账本(BUDGET.json):get 查账(含 totals 聚合);set-estimate / set-cap 设置估算与上限(形状自由,工具不解释);commit 逐阶段上报消耗(entry.stageId/role/usage,source 默认 self-report)。每阶段结算后都应上报一次。',
+    description: '项目预算账本(BUDGET.json):get 查账(含 totals 聚合);set-estimate / set-cap 设置估算与上限(形状自由,工具不解释);commit 逐阶段上报消耗(entry.stageId/role/usage,source 默认 self-report)。source=runtime-events 且 usage 缺省时插件按调用者会话 id 读 projcache 自动填真实 token 四桶。每阶段结算后都应上报一次。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -1370,14 +1620,14 @@ export function apply(ctx, config = {}) {
         cap: { type: 'object', description: 'set-cap 必给:上限(形状自由)。' },
         entry: {
           type: 'object',
-          description: 'commit 必给:{ stageId, role, usage, source?=self-report }。',
+          description: 'commit 必给:{ stageId, role, usage?, source?=self-report }。source=runtime-events 且 usage 缺省时自动填真实 token。',
           properties: {
             stageId: { type: 'string', description: '发生消耗的阶段 id。' },
             role: { type: 'string', description: '消耗归属角色 id。' },
-            usage: { type: 'object', description: '用量(记 token/调用次数/金额字段均可,形状自由)。' },
+            usage: { type: 'object', description: '用量(记 token/调用次数/金额字段均可,形状自由);source=runtime-events 时可缺省由插件自动填。' },
             source: { type: 'string', enum: [...BUDGET_SOURCES], description: '取数口径,默认 self-report。' },
           },
-          required: ['stageId', 'role', 'usage'],
+          required: ['stageId', 'role'],
         },
       },
       required: ['projectId', 'action'],

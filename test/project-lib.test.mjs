@@ -1,9 +1,11 @@
-// project-lib 纯库单测(机制1 既定裁决库 + 机制2 失败模式聚合)。运行:
+// project-lib 纯库单测(机制1 既定裁决库 + 机制2 失败模式聚合 + 0.8.0 真实 token 计量)。运行:
 //   cd presets/project-pipeline && node test/project-lib.test.mjs
 // 打法:os.tmpdir 下 mkdtemp 临时 workspace(自建自清),直接驱动纯函数。
 // 覆盖:validateRulings(结构合法/非法)、readRulings(读/缺失/坏 JSON)、
 // matchRuling(命中判据=前提一致才命中)、collectAllBlockers(扫 sibling REGISTRY
 // 含 delivered)、aggregateByCategory(同 category ≥2 计数)、buildFailureReport(四要素)。
+// 0.8.0 新增:readProjcache(守卫 unit.version)、sessionTokenUsage(有效计费口径)、
+// aggregateByRole(按角色桶聚合)。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -12,10 +14,13 @@ import { join } from 'node:path';
 import {
   BLOCKER_CATEGORIES,
   aggregateByCategory,
+  aggregateByRole,
   buildFailureReport,
   collectAllBlockers,
   matchRuling,
+  readProjcache,
   readRulings,
+  sessionTokenUsage,
   validateRulings,
   writeJson,
 } from '../plugins/project-lib.mjs';
@@ -254,4 +259,92 @@ test('BLOCKER_CATEGORIES 白名单与 project-registry 对齐', () => {
     'acceptance-capability',
     'other',
   ]);
+});
+
+// ── 0.8.0 真实 token 计量:readProjcache / sessionTokenUsage / aggregateByRole ──
+
+/** 构造一份合法 projcache(unit.version=3)。 */
+function makeProjcache(sessions) {
+  return {
+    unit: { version: 3 },
+    tables: {
+      sessions: Object.fromEntries(
+        Object.entries(sessions).map(([sid, totals]) => [
+          sid,
+          { rows: { tokenUsage: { val: { totals } } } },
+        ]),
+      ),
+    },
+  };
+}
+
+test('readProjcache:合法 version=3 返回 data + mtime(AC-M3)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  const file = join(workspace, 'projcache.json');
+  await writeJson(file, makeProjcache({ s1: { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 } }));
+  const result = await readProjcache(file);
+  assert.equal(result.data.unit.version, 3);
+  assert.equal(result.data.tables.sessions.s1.rows.tokenUsage.val.totals.uncachedInputTokens, 100);
+  assert.ok(typeof result.mtime === 'string' && result.mtime.length > 0, 'mtime 应为 ISO 串');
+});
+
+test('readProjcache:unit.version 缺失或 ≠3 → 中文报错,不误解析(AC-M3)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  // version=2
+  const v2 = join(workspace, 'v2.json');
+  await writeJson(v2, { unit: { version: 2 }, tables: {} });
+  await assert.rejects(() => readProjcache(v2), /版本不支持.*仅支持 3/);
+  // 缺 unit
+  const noUnit = join(workspace, 'no-unit.json');
+  await writeJson(noUnit, { tables: {} });
+  await assert.rejects(() => readProjcache(noUnit), /版本不支持/);
+  // 缺 version
+  const noVer = join(workspace, 'no-ver.json');
+  await writeJson(noVer, { unit: {}, tables: {} });
+  await assert.rejects(() => readProjcache(noVer), /版本不支持/);
+});
+
+test('readProjcache:文件缺失/坏 JSON → 中文报错', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await assert.rejects(() => readProjcache(join(workspace, 'missing.json')), /读取 projcache 失败/);
+  const bad = join(workspace, 'bad.json');
+  await writeFile(bad, '{oops', 'utf8');
+  await assert.rejects(() => readProjcache(bad), /不是合法 JSON/);
+});
+
+test('sessionTokenUsage:会话在表内返回四桶;不在表内/结构缺失 → null', () => {
+  const projcache = makeProjcache({
+    s1: { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  });
+  const usage = sessionTokenUsage(projcache, 's1');
+  assert.deepEqual(usage, { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 });
+  assert.equal(sessionTokenUsage(projcache, 'ghost'), null, '会话不在表内 → null');
+  assert.equal(sessionTokenUsage(null, 's1'), null);
+  assert.equal(sessionTokenUsage({ tables: {} }, 's1'), null);
+});
+
+test('aggregateByRole:按角色桶聚合,会话不在 projcache 表内跳过', () => {
+  const projcache = makeProjcache({
+    s1: { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    s2: { uncachedInputTokens: 200, outputTokens: 30, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    s3: { uncachedInputTokens: 50, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  });
+  const sessions = {
+    s1: { role: 'coordinator' },
+    s2: { role: 'dev' },
+    s3: { role: 'dev' },
+    ghost: { role: 'dev' }, // 不在 projcache 表内 → 跳过
+  };
+  const buckets = aggregateByRole(sessions, projcache);
+  assert.deepEqual(buckets, {
+    coordinator: { tokens: 120, uncachedInputTokens: 100, outputTokens: 20, sessionCount: 1 },
+    dev: { tokens: 285, uncachedInputTokens: 250, outputTokens: 35, sessionCount: 2 },
+  });
+  assert.equal(buckets.dev.sessionCount, 2, 'ghost 会话被跳过,不计数');
+});
+
+test('aggregateByRole:空/非法输入 → 空对象', () => {
+  assert.deepEqual(aggregateByRole(null, {}), {});
+  assert.deepEqual(aggregateByRole({}, {}), {});
+  assert.deepEqual(aggregateByRole({ s1: { role: 'dev' } }, null), {});
 });

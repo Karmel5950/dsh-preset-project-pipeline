@@ -2,6 +2,19 @@
 
 本 preset 的全部显著变更记录在此文件。
 
+## [0.8.0] - 2026-09-01
+
+预算账本改真实 token 计量(budget-token-meter 交付;背景:原 BUDGET.json committed 全是角色自报的拍脑袋数字,usage 形状自由不可聚合,estimate/cap 多为 null——预算系统形同装饰。运行时本有逐会话真实 tokenUsage(projcache 投影),只是从未接入)。
+
+- **A commit 自动填**:`project_budget` commit 允许 `source='runtime-events'` 且 usage 缺省 → 插件按调用者会话 id 读 projcache(`context.agent.session.header.id`)自动填四桶(uncachedInputTokens/outputTokens/cacheRead/cacheWrite),条目带 asOf/projcacheMtime 供复核;有效计费口径 = uncachedInput + output(DeepSeek 路由 cache 桶恒 0)。
+- **B advance 联动归集**:每次 advance 自动 collect——扫 REGISTRY.sessions(主备两路登记:协调者 spawn 回传 subagentId 为主,任何会话首调 project 工具按调用类型自动记为兜底),读 projcache 按角色分桶汇总,**全量重算并替换**全部 runtime-events 条目(同一 sessionId 不重复计数);幂等、非致命(projcache 读失败/守卫报错不阻断 advance,带 collected.note)。
+- **口径(C2+R1β)**:项目账本只计项目私有会话(协调者/角色/探针)按 role 分桶;intake 及被 ≥2 项目登记的共享会话只进工作区级汇总计一次(sharedOnce)——实测 intake 全量计入各项目会造成约 30 倍失真,项目间不可比。
+- **projcache 纯函数**:`readProjcache`(unit.version=3 守卫,≠3 中文报错不误解析)/`sessionTokenUsage`/`aggregateByRole`;定位 = config `projcachePath` 显式优先,env DSH_HOME/storages 回退。
+- **host 看板(project-hub)**:computeTotals/budgetSummary/aggregateBudget 对 runtime-events 条目按桶数值求和(byRole[role] = { count, tokens } + totalTokens),工作区级含 sharedOnce;看板预算列/预算 tab/工作区汇总呈现真实 token 总量;i18n 增 totalTokens/sharedOnce 键;host 侧同款 projcache 读取与守卫。
+- **coordinator persona**:移除「每阶段 budget 上报」(自动归集取代),增「advance 时传 spawn 返回的 subagentId 登记会话」;694 字符(≤700)。
+- 容差声明:runtime-events 数字反映 collect 时刻 projcache 检查点快照(检查点延迟实测 ≤1.7h),project_status 输出附来源说明。
+- 版本 0.7.0 → **0.8.0(minor)**:BUDGET_SOURCES 枚举不动(复用预留的 'runtime-events' 口径)= 能力新增
+
 ## [0.7.0] - 2026-08-31
 
 看板搜索/筛选 + 项目操作(归档/置顶)写路径(project-hub-i8 交付;背景:看板项目多时找项目难,且归档/置顶这类展示层语义无处安放——登记簿状态机语义不可动,需开一个窄写面)。
