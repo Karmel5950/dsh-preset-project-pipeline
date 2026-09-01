@@ -1,28 +1,18 @@
-## [0.9.0] - 2026-09-01
-
-### P0:intake 会话一次性化(kr-p0-intake;REFACTOR-PLAN 波1 首项)
-
-- persona(agent.cordis.yml)只增不删 +9 行,新增三条纪律:会话绑定(本项目专属,结束退役,权威来源=REGISTRY.sessions)/任务路由(深度调研/架构分析/跨项目对账一律登记;纯问答=一屏以内且无需工具)/登记触点(同实体仓新需求默认提示是否为既有 entity 迭代)
-- toolkit 新增 pipeline-start.mjs:session.create(project-pipeline, cwd=pipeline-ws)+投递登记 prompt+输出会话 id(一切调用显式 baseUrl=3081)
-- dsh-pipeline 技能 SKILL.md:会话常量段去除全局固定 intake id,改为每项目从 REGISTRY.sessions 取 role==intake 会话
-
 # Changelog
 
 本 preset 的全部显著变更记录在此文件。
 
-## [0.8.0] - 2026-09-01
+## [0.10.0] - 2026-09-01
 
-预算账本改真实 token 计量(budget-token-meter 交付;背景:原 BUDGET.json committed 全是角色自报的拍脑袋数字,usage 形状自由不可聚合,estimate/cap 多为 null——预算系统形同装饰。运行时本有逐会话真实 tokenUsage(projcache 投影),只是从未接入)。
+项目底座层 Base Dossier(kr-p1-base 交付;背景:实体仓每迭代"五遍读书重导入税"——跨迭代上下文无处安放,角色每次进场全量重读)。
 
-- **A commit 自动填**:`project_budget` commit 允许 `source='runtime-events'` 且 usage 缺省 → 插件按调用者会话 id 读 projcache(`context.agent.session.header.id`)自动填四桶(uncachedInputTokens/outputTokens/cacheRead/cacheWrite),条目带 asOf/projcacheMtime 供复核;有效计费口径 = uncachedInput + output(DeepSeek 路由 cache 桶恒 0)。
-- **B advance 联动归集**:每次 advance 自动 collect——扫 REGISTRY.sessions(主备两路登记:协调者 spawn 回传 subagentId 为主,任何会话首调 project 工具按调用类型自动记为兜底),读 projcache 按角色分桶汇总,**全量重算并替换**全部 runtime-events 条目(同一 sessionId 不重复计数);幂等、非致命(projcache 读失败/守卫报错不阻断 advance,带 collected.note)。
-- **口径(C2+R1β)**:项目账本只计项目私有会话(协调者/角色/探针)按 role 分桶;intake 及被 ≥2 项目登记的共享会话只进工作区级汇总计一次(sharedOnce)——实测 intake 全量计入各项目会造成约 30 倍失真,项目间不可比。
-- **projcache 纯函数**:`readProjcache`(unit.version=3 守卫,≠3 中文报错不误解析)/`sessionTokenUsage`/`aggregateByRole`;定位 = config `projcachePath` 显式优先,env DSH_HOME/storages 回退。
-- **host 看板(project-hub)**:computeTotals/budgetSummary/aggregateBudget 对 runtime-events 条目按桶数值求和(byRole[role] = { count, tokens } + totalTokens),工作区级含 sharedOnce;看板预算列/预算 tab/工作区汇总呈现真实 token 总量;i18n 增 totalTokens/sharedOnce 键;host 侧同款 projcache 读取与守卫。
-- **coordinator persona**:移除「每阶段 budget 上报」(自动归集取代),增「advance 时传 spawn 返回的 subagentId 登记会话」;694 字符(≤700)。
-- 容差声明:runtime-events 数字反映 collect 时刻 projcache 检查点快照(检查点延迟实测 ≤1.7h),project_status 输出附来源说明。
-- 交付门禁轮修复:collect 的 sibling REGISTRY 扫描 `readFile is not defined`(未 import 的异步版)→ 改 `readFileSync`,「≥2 项目登记=共享」判定恢复生效;补回归测试(共享会话不进项目账本)。
-- 版本 0.7.0 → **0.8.0(minor)**:BUDGET_SOURCES 枚举不动(复用预留的 'runtime-events' 口径)= 能力新增
+- **实体仓底座 Base Dossier**:新增工作区级目录 `<workspace>/.dsh-base/<entitySlug>/`(与 .dsh-library 平级,entitySlug 过卫兵),四件套 MAP.md(模块地图)/ DECISIONS.md(决策日志,append-only)/ RUNBOOK.md(运行手册,命令级)/ STATE.md(状态快照,带 last-verified 戳),跨迭代存活、增量维护。project-lib 增 `baseDossierPaths`/`baseDossierExists`/`entitySlugOf` 纯函数
+- **REGISTRY.entitySlug(schemaVersion 1→2 只增)**:缺省=项目自身;25 存量项目无 entitySlug 视为 legacy,零影响。`assertRegistry` 兼容 schemaVersion ∈ {1,2}(C3:读旧登记簿不报错、写回不迁移);project_status 单项目详情增 entitySlug
+- **project_register 增 entity 入参**:entity-slug(缺省=项目自身);entity 已有底座 → 回执 baseDossier.exists=true;没有 → draftNeeded=true 且 clarify 阶段 produces 扩展底座初稿四件套(流程数据表达,不加新阶段类型);回执增 baseDossier{entity,path,exists,draftNeeded}
+- **role manifest 增 readings 段**:路径模板数组(支持 {{base}}/{{project}} 变量);validateRole 只增校验;compileSubagent 展开为"进场必读"头前置到 persona;编译后 persona(头+正文)超 MAX_COMPILED_PERSONA(1000,C4a)在 role_show 编译期报错;role_show 给 projectId 时输出展开后的 readings 路径清单。六角色 readings 定案(coordinator 精简为 6 条,C4b:REGISTRY/FLOW/SUMMARY + STATE/MAP/DECISIONS;其余五角色按 DESIGN §6.2)
+- **iteration-flow 模板**:纯数据进 preset 默认库(prelude(work:coordinator,读底座+上轮 STATE→增量更新)→ lite 主体(clarify→build→test→delivery-gate→wrap)→ harvest(work:更新底座 STATE/DECISIONS));阶段类型全在既有 work/gate/summary 内,不加新词
+- 版本 0.9.0 → **0.10.0(minor)**:底座 + entity + readings + iteration-flow = 能力新增
+- 测试:project-lib 增 entitySlugOf/baseDossierPaths/baseDossierExists/validateReadings/expandReadings/compileReadingsHeader 单测;project-registry 增 entity 登记(有/无底座)、schemaVersion=2+entitySlug、C3 兼容(读旧 1 不报错、写回不破坏未修改字段、不升 schemaVersion);project-roles 增 readings 编译/超限报错/role_show readings 输出;存量测试全量通过(register schemaVersion 断言 1→2 同步更新)
 
 ## [0.7.0] - 2026-08-31
 

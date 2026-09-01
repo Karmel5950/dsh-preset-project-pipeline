@@ -6,6 +6,8 @@
 // 含 delivered)、aggregateByCategory(同 category ≥2 计数)、buildFailureReport(四要素)。
 // 0.8.0 新增:readProjcache(守卫 unit.version)、sessionTokenUsage(有效计费口径)、
 // aggregateByRole(按角色桶聚合)。
+// 0.10.0 新增(P1 底座):entitySlugOf / baseDossierPaths / baseDossierExists /
+// validateReadings / expandReadings / compileReadingsHeader / MAX_COMPILED_PERSONA。
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
@@ -13,14 +15,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   BLOCKER_CATEGORIES,
+  MAX_COMPILED_PERSONA,
   aggregateByCategory,
   aggregateByRole,
+  baseDossierExists,
+  baseDossierPaths,
   buildFailureReport,
   collectAllBlockers,
+  compileReadingsHeader,
+  entitySlugOf,
+  expandReadings,
   matchRuling,
   readProjcache,
   readRulings,
   sessionTokenUsage,
+  validateReadings,
   validateRulings,
   writeJson,
 } from '../plugins/project-lib.mjs';
@@ -347,4 +356,65 @@ test('aggregateByRole:空/非法输入 → 空对象', () => {
   assert.deepEqual(aggregateByRole(null, {}), {});
   assert.deepEqual(aggregateByRole({}, {}), {});
   assert.deepEqual(aggregateByRole({ s1: { role: 'dev' } }, null), {});
+});
+
+// ── 0.10.0 实体仓底座 + role readings(P1)────────────────────────────────
+
+test('MAX_COMPILED_PERSONA = 1000(C4a:头+正文合计)', () => {
+  assert.equal(MAX_COMPILED_PERSONA, 1000);
+});
+
+test('entitySlugOf:缺省=项目自身;有 entitySlug 时返回之(legacy 兼容)', () => {
+  assert.equal(entitySlugOf({ id: 'proj-a' }), 'proj-a', '无 entitySlug → 项目自身');
+  assert.equal(entitySlugOf({ id: 'proj-a', entitySlug: 'shared-entity' }), 'shared-entity');
+  assert.equal(entitySlugOf({ id: 'proj-a', entitySlug: '' }), 'proj-a', '空 entitySlug → 项目自身');
+  assert.equal(entitySlugOf(null), undefined);
+  assert.equal(entitySlugOf({}), undefined);
+});
+
+test('baseDossierPaths:布局与 entitySlug 卫兵(含分隔符/.. 拒绝)', () => {
+  const root = join('ws-root');
+  const paths = baseDossierPaths(root, 'my-entity');
+  assert.equal(paths.baseDir, join(root, '.dsh-base', 'my-entity'));
+  assert.equal(paths.mapFile, join(root, '.dsh-base', 'my-entity', 'MAP.md'));
+  assert.equal(paths.decisionsFile, join(root, '.dsh-base', 'my-entity', 'DECISIONS.md'));
+  assert.equal(paths.runbookFile, join(root, '.dsh-base', 'my-entity', 'RUNBOOK.md'));
+  assert.equal(paths.stateFile, join(root, '.dsh-base', 'my-entity', 'STATE.md'));
+  for (const bad of ['../evil', 'a/b', 'a\\b', '..', '.', 'x y', '-lead', '']) {
+    assert.throws(() => baseDossierPaths(root, bad), /entitySlug/, `entitySlug ${JSON.stringify(bad)} 应被拒绝`);
+  }
+});
+
+test('baseDossierExists:以 STATE.md 存在为准', async (t) => {
+  const workspace = await makeWorkspace(t);
+  assert.equal(await baseDossierExists(workspace, 'my-entity'), false, '无底座 → false');
+  await mkdir(join(workspace, '.dsh-base', 'my-entity'), { recursive: true });
+  await writeFile(join(workspace, '.dsh-base', 'my-entity', 'STATE.md'), '# 状态\n', 'utf8');
+  assert.equal(await baseDossierExists(workspace, 'my-entity'), true, '有 STATE.md → true');
+});
+
+test('validateReadings:只增校验(非空字符串数组;缺省通过)', () => {
+  assert.equal(validateReadings(undefined).ok, true, '缺省通过');
+  assert.equal(validateReadings(['{{base}}/STATE.md', '{{project}}/SPEC.md']).ok, true);
+  assert.equal(validateReadings([]).ok, false, '空数组拒绝');
+  assert.equal(validateReadings(['a', '']).ok, false, '含空项拒绝');
+  assert.equal(validateReadings('x').ok, false, '非数组拒绝');
+  assert.equal(validateReadings([1]).ok, false, '非字符串项拒绝');
+});
+
+test('expandReadings:替换 {{base}}/{{project}} 变量', () => {
+  const readings = ['{{base}}/STATE.md', '{{project}}/SPEC.md', '{{base}}/MAP.md'];
+  const expanded = expandReadings(readings, { base: '.dsh-base/ent', project: 'proj-a' });
+  assert.deepEqual(expanded, ['.dsh-base/ent/STATE.md', 'proj-a/SPEC.md', '.dsh-base/ent/MAP.md']);
+  // 未给变量 → 保留原模板
+  assert.deepEqual(expandReadings(readings, {}), readings);
+  // 非数组 → 空数组
+  assert.deepEqual(expandReadings(undefined, {}), []);
+});
+
+test('compileReadingsHeader:展开 readings 拼"进场必读"头;无 readings → 空串', () => {
+  const header = compileReadingsHeader(['{{base}}/STATE.md', '{{project}}/SPEC.md'], { base: '.dsh-base/ent', project: 'proj-a' });
+  assert.equal(header, '进场必读:\n- .dsh-base/ent/STATE.md\n- proj-a/SPEC.md');
+  assert.equal(compileReadingsHeader([], {}), '');
+  assert.equal(compileReadingsHeader(undefined, {}), '');
 });

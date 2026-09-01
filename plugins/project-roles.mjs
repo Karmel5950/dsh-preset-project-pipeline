@@ -20,9 +20,21 @@
 // lib 装载:默认按契约动态 import('./project-lib.mjs')(未就绪时工具调用返回
 // 明确中文错误,不炸插件);若 ctx 服务表挂了 'project-lib'(仅单测桩使用),
 // 优先消费——单测可在 lib 完成前注入 stub,生产路径不受影响。
+//
+// 0.10.0 新增(项目底座层 Base Dossier P1,2026-09-01):
+//   - compileSubagent 展开 manifest.readings 为"进场必读"头前置到 persona;
+//     编译后 persona(头+正文)超 MAX_COMPILED_PERSONA(1000)在 role_show 编译期抛错;
+//   - role_show 给 projectId 时读项目 REGISTRY 取 entitySlug,把 {{base}}/{{project}}
+//     展开为具体路径清单,输出 readings 字段。
 
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+// P1:readings 编译所需的纯函数静态导入(project-lib 恒在 preset 内,无循环依赖)。
+import {
+  MAX_COMPILED_PERSONA,
+  compileReadingsHeader,
+  expandReadings,
+} from './project-lib.mjs';
 
 export const name = 'project-pipeline-roles';
 
@@ -74,8 +86,14 @@ function errorText(value) {
 }
 
 /** 把角色清单编译为官方 subagent 工具的 spawn 参数面(DESIGN §5.2 P1 列)。 */
-function compileSubagent(manifest) {
-  const subagent = { persona: manifest.persona };
+function compileSubagent(manifest, { base, project } = {}) {
+  // P1:readings 展开为"进场必读"头,前置到 persona(头+正文合计 ≤ MAX_COMPILED_PERSONA)。
+  const header = compileReadingsHeader(manifest.readings, { base, project });
+  const persona = header.length > 0 ? `${header}\n${manifest.persona}` : manifest.persona;
+  if (persona.length > MAX_COMPILED_PERSONA) {
+    throw new Error(`角色 "${manifest.id}" 编译后 persona(进场必读头+正文)超限:${persona.length} > ${MAX_COMPILED_PERSONA};请裁剪 readings 或 persona`);
+  }
+  const subagent = { persona };
   // toolFilter 仅在清单声明 tools 时给出(allow/deny 二选一,清单校验已保证)。
   if (manifest.tools?.allow !== undefined) subagent.toolFilter = { allow: [...manifest.tools.allow] };
   else if (manifest.tools?.deny !== undefined) subagent.toolFilter = { deny: [...manifest.tools.deny] };
@@ -200,13 +218,13 @@ export function apply(ctx, config = {}) {
   ctx.tools.register({
       name: 'role_show',
       description:
-        '展开一份角色清单:返回全文 persona 与可直接拷进 subagent 调用的参数(persona/toolFilter/agentOptions)及工作空间纪律;spawn 角色前必用。',
+        '展开一份角色清单:返回全文 persona 与可直接拷进 subagent 调用的参数(persona/toolFilter/agentOptions)及工作空间纪律;spawn 角色前必用。角色清单带 readings 时,给 projectId 会把 {{base}}/{{project}} 展开为具体路径清单(输出 readings 字段),并把"进场必读"头前置到编译后 persona;编译后 persona 超限(>1000)报错。',
       parameters: {
         type: 'object',
         additionalProperties: false,
         properties: {
           role: { type: 'string', description: '角色 id,如 coordinator / product。' },
-          projectId: { type: 'string', description: '可选;提供后工作空间说明按真实项目 id 呈现。' },
+          projectId: { type: 'string', description: '可选;提供后工作空间说明按真实项目 id 呈现,且 readings 展开为具体路径清单。' },
         },
         required: ['role'],
       },
@@ -219,6 +237,7 @@ export function apply(ctx, config = {}) {
             source: { type: 'string', enum: ['workspace', 'preset'] },
             summary: { type: 'string' },
             persona: { type: 'string' },
+            readings: { type: 'array', items: { type: 'string' }, description: '展开后的进场必读路径清单(给 projectId 时);未给 projectId 时返回原始模板。' },
             subagent: {
               type: 'object',
               additionalProperties: false,
@@ -265,12 +284,36 @@ export function apply(ctx, config = {}) {
           throw new Error(`角色清单 "${entry.id}" 的 persona 缺失或为空,清单已损坏;请修复后再 spawn。`);
         }
         const projectId = typeof args.projectId === 'string' && args.projectId.length > 0 ? args.projectId : undefined;
+        // P1:readings 展开。给 projectId 时读项目 REGISTRY 取 entitySlug(缺省=项目自身),
+        // 把 {{base}}/{{project}} 展开为相对工作区路径;未给 projectId 时返回原始模板。
+        let readings;
+        let base;
+        let project;
+        if (Array.isArray(manifest.readings) && manifest.readings.length > 0) {
+          if (projectId !== undefined) {
+            const workspaceDir = sessionWorkspaceOf(exec);
+            let entitySlug = projectId;
+            try {
+              const lib2 = await loadLib();
+              const reg = await lib2.readJson(path.join(workspaceDir, projectId, '.dsh-project', 'REGISTRY.json'));
+              entitySlug = lib2.entitySlugOf(reg) ?? projectId;
+            } catch {
+              entitySlug = projectId; // 读不到登记簿 → 缺省=项目自身
+            }
+            base = `.dsh-base/${entitySlug}`;
+            project = `${projectId}`;
+            readings = expandReadings(manifest.readings, { base, project });
+          } else {
+            readings = manifest.readings; // 原始模板,需 projectId 展开
+          }
+        }
         return {
           id: manifest.id ?? roleId,
           source: entry.source,
           summary: manifest.summary,
           persona: manifest.persona,
-          subagent: compileSubagent(manifest),
+          readings,
+          subagent: compileSubagent(manifest, { base, project }),
           workspaceNote: workspaceNoteFor(manifest, projectId),
         };
       },

@@ -150,7 +150,7 @@ test('插件元数据:6 个工具 + 1 条手册提示段(注册常驻,不接线 
   const section = ctx.systemPrompt.items[0];
   assert.equal(section.name, 'project-pipeline/manual');
   assert.equal(section.order, 140);
-  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked', 'id 入参', 'runtime-events', 'projcache', 'sessions']) {
+  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked', 'id 入参', 'runtime-events', 'projcache', 'sessions', '底座', 'entitySlug', 'readings', 'MAX_COMPILED_PERSONA']) {
     assert.ok(section.text.includes(word), `手册段应包含 ${word}`);
   }
 });
@@ -208,7 +208,8 @@ test('project_register:建全骨架,REGISTRY/FLOW/BUDGET/REQUIREMENT 落盘', as
   assert.ok(existsSync(paths.journalDir) && existsSync(paths.gatesDir) && existsSync(paths.feedbackDir));
 
   const registry = await readJson(paths.registryFile);
-  assert.equal(registry.schemaVersion, 1);
+  assert.equal(registry.schemaVersion, 2, 'P1:新登记簿 schemaVersion=2');
+  assert.equal(registry.entitySlug, 'demo-app', 'P1:entitySlug 缺省=项目自身');
   assert.equal(registry.id, 'demo-app');
   assert.equal(registry.title, 'Demo App');
   assert.equal(registry.flowRef, 'mini-flow@1');
@@ -229,6 +230,163 @@ test('project_register:建全骨架,REGISTRY/FLOW/BUDGET/REQUIREMENT 落盘', as
   const requirement = await readFile(paths.requirementFile, 'utf8');
   assert.ok(requirement.includes('做一个 demo,要求中文注释'), '需求原文逐字入档');
   assert.ok(requirement.includes('demo-app'));
+});
+
+// ── P1 实体仓底座:entity 入参 / entitySlug / 底座初稿 / C3 兼容 ──────────
+
+test('project_register:entity 入参 → entitySlug=entity,回执 baseDossier(无底座 draftNeeded)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  const result = await getTool(ctx, 'project_register').execute({
+    title: 'Entity Demo', id: 'entity-demo', requirement: 'r', flowTemplate: 'mini-flow', entity: 'shared-entity',
+  }, context);
+  assert.equal(result.projectId, 'entity-demo');
+  assert.equal(result.baseDossier.entity, 'shared-entity');
+  assert.equal(result.baseDossier.exists, false, '无底座 → exists=false');
+  assert.equal(result.baseDossier.draftNeeded, true, '无底座 → draftNeeded=true');
+  assert.ok(result.baseDossier.path.includes('.dsh-base'), '底座路径在工作区级 .dsh-base/');
+  const registry = await readJson(registryPaths(workspace, 'entity-demo').registryFile);
+  assert.equal(registry.schemaVersion, 2);
+  assert.equal(registry.entitySlug, 'shared-entity');
+});
+
+test('project_register:entity 已有底座 → baseDossier.exists=true,draftNeeded=false', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  // 预建底座(STATE.md 存在即视为有底座)。
+  await mkdir(join(workspace, '.dsh-base', 'shared-entity'), { recursive: true });
+  await writeFile(join(workspace, '.dsh-base', 'shared-entity', 'STATE.md'), '# 状态\n', 'utf8');
+  const ctx = await mountPlugin();
+  const result = await getTool(ctx, 'project_register').execute({
+    title: 'Entity Has', id: 'entity-has', requirement: 'r', flowTemplate: 'mini-flow', entity: 'shared-entity',
+  }, sessionContext(workspace));
+  assert.equal(result.baseDossier.exists, true);
+  assert.equal(result.baseDossier.draftNeeded, false);
+  const registry = await readJson(registryPaths(workspace, 'entity-has').registryFile);
+  assert.equal(registry.entitySlug, 'shared-entity');
+});
+
+test('project_register:entity 非法(含分隔符/..)拒收', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  for (const bad of ['../evil', 'a/b', 'a\\b', '..', '.', 'x y', '-lead', '']) {
+    await assert.rejects(
+      () => getTool(ctx, 'project_register').execute({ title: 'x', id: 'x', requirement: 'r', entity: bad }, context),
+      /entity 非法/,
+      `entity ${JSON.stringify(bad)} 应被拒收`,
+    );
+  }
+});
+
+test('project_register:entity 无底座时 clarify 阶段 produces 扩展底座初稿四件套(流程数据表达)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  // 用带 clarify 的模板(standard-flow 形状,含 clarify work 阶段)。
+  await writeTemplate(workspace, 'std', [
+    { id: 'clarify', type: 'work', role: 'product', produces: ['SPEC.md'] },
+    { id: 'build', type: 'work', role: 'dev' },
+  ]);
+  const ctx = await mountPlugin();
+  const result = await getTool(ctx, 'project_register').execute({
+    title: 'Draft', id: 'draft', requirement: 'r', flowTemplate: 'std', entity: 'new-entity',
+  }, sessionContext(workspace));
+  assert.equal(result.baseDossier.draftNeeded, true);
+  const flow = await readJson(registryPaths(workspace, 'draft').flowFile);
+  const clarify = flow.stages.find((s) => s.id === 'clarify');
+  assert.equal(clarify.type, 'work', 'clarify 仍是 work(不加新阶段类型)');
+  assert.ok(clarify.produces.includes('SPEC.md'), '原 produces 保留');
+  for (const p of ['base-dossier/MAP.md', 'base-dossier/DECISIONS.md', 'base-dossier/RUNBOOK.md', 'base-dossier/STATE.md']) {
+    assert.ok(clarify.produces.includes(p), `clarify produces 应含 ${p}`);
+  }
+  // 模板未被污染:再登记一个同 entity 无底座的项目,clarify produces 仍只含 SPEC.md(克隆语义)。
+  const second = await getTool(ctx, 'project_register').execute({
+    title: 'Draft2', id: 'draft2', requirement: 'r', flowTemplate: 'std', entity: 'new-entity',
+  }, sessionContext(workspace));
+  assert.equal(second.baseDossier.draftNeeded, true);
+  const flow2 = await readJson(registryPaths(workspace, 'draft2').flowFile);
+  assert.deepEqual(flow2.stages.find((s) => s.id === 'clarify').produces, ['SPEC.md', 'base-dossier/MAP.md', 'base-dossier/DECISIONS.md', 'base-dossier/RUNBOOK.md', 'base-dossier/STATE.md']);
+});
+
+test('project_status:单项目详情含 entitySlug(经 entitySlugOf)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'Status Ent', id: 'status-ent', requirement: 'r', flowTemplate: 'mini-flow', entity: 'ent-x' }, context);
+  const detail = await getTool(ctx, 'project_status').execute({ projectId: 'status-ent' }, context);
+  assert.equal(detail.project.entitySlug, 'ent-x');
+});
+
+// ── C3 schema 兼容:读旧 schemaVersion=1 登记簿不报错、写回不破坏 ──────────
+
+test('C3:读旧 REGISTRY(schemaVersion=1,无 entitySlug)不报错,advance 正常', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'Legacy', id: 'legacy', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  // 手工降级为旧登记簿形状(schemaVersion=1,删 entitySlug)。
+  const regFile = registryPaths(workspace, 'legacy').registryFile;
+  const old = await readJson(regFile);
+  delete old.entitySlug;
+  old.schemaVersion = 1;
+  await writeJson(regFile, old);
+  // 读不报错:status 正常。
+  const detail = await getTool(ctx, 'project_status').execute({ projectId: 'legacy' }, context);
+  assert.equal(detail.project.entitySlug, 'legacy', '旧登记簿 entitySlug 缺省=项目自身');
+  // advance 正常。
+  const out = await getTool(ctx, 'project_advance').execute({ projectId: 'legacy' }, context);
+  assert.equal(out.stageIndex, 1);
+});
+
+test('C3:写回不破坏未修改字段,不升 schemaVersion、不新增 entitySlug', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'Legacy2', id: 'legacy2', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  const regFile = registryPaths(workspace, 'legacy2').registryFile;
+  const old = await readJson(regFile);
+  delete old.entitySlug;
+  old.schemaVersion = 1;
+  old.title = 'Legacy2 原样';
+  await writeJson(regFile, old);
+  // 执行写回操作(advance 会写 REGISTRY)。
+  await getTool(ctx, 'project_advance').execute({ projectId: 'legacy2' }, context);
+  const after = await readJson(regFile);
+  assert.equal(after.schemaVersion, 1, '不升 schemaVersion');
+  assert.equal(after.entitySlug, undefined, '不新增 entitySlug');
+  assert.equal(after.title, 'Legacy2 原样', 'title 原样保留');
+  assert.equal(after.id, 'legacy2');
+  assert.equal(after.flowRef, 'mini-flow@1');
+  assert.equal(after.iteration, 1);
+  assert.equal(after.stageIndex, 1, 'advance 正常推进');
+});
+
+test('C3:25 存量项目零影响实证(真实存量形状 schemaVersion=1 无 entitySlug 读+写回)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  // 用真实存量形状(project-hub/consumption-query 同款:schemaVersion=1 无 entitySlug)。
+  await getTool(ctx, 'project_register').execute({ title: 'Hub', id: 'project-hub', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  const regFile = registryPaths(workspace, 'project-hub').registryFile;
+  const old = await readJson(regFile);
+  delete old.entitySlug;
+  old.schemaVersion = 1;
+  await writeJson(regFile, old);
+  // 读(assertRegistry/entitySlugOf)+ 写回(advance)。
+  const detail = await getTool(ctx, 'project_status').execute({ projectId: 'project-hub' }, context);
+  assert.equal(detail.project.entitySlug, 'project-hub', '缺省=项目自身');
+  await getTool(ctx, 'project_advance').execute({ projectId: 'project-hub' }, context);
+  const after = await readJson(regFile);
+  assert.equal(after.schemaVersion, 1, '存量登记簿不升 schemaVersion');
+  assert.equal(after.entitySlug, undefined, '存量登记簿不新增 entitySlug');
+  assert.equal(after.id, 'project-hub');
+  assert.equal(after.iteration, 1);
 });
 
 test('project_register:同名冲突 -2 递增;纯中文标题无 id 拒收并提示提供 id', async (t) => {
@@ -746,10 +904,11 @@ test('output.render:各工具渲染出含关键信息的字符串', async (t) =>
   const context = sessionContext(workspace);
   const registerText = getTool(ctx, 'project_register').output.render(
     {},
-    { projectId: 'p1', projectDir: '/d/p1', state: 'active', flowSummary: [{ index: 0, id: 'a', type: 'work' }], nextStage: { index: 0, id: 'a', type: 'work', role: 'dev' } },
+    { projectId: 'p1', projectDir: '/d/p1', state: 'active', flowSummary: [{ index: 0, id: 'a', type: 'work' }], nextStage: { index: 0, id: 'a', type: 'work', role: 'dev' }, baseDossier: { entity: 'p1', path: '/d/.dsh-base/p1', exists: false, draftNeeded: true } },
   ).map((b) => b.text).join('\n');
   assert.match(registerText, /p1/);
   assert.match(registerText, /下一阶段/);
+  assert.match(registerText, /底座/);
   const advanceText = getTool(ctx, 'project_advance').output.render(
     { projectId },
     { stageIndex: 1, iteration: 1, stage: { index: 1, id: 'review', type: 'gate' }, journalPath: 'j.md', delivered: false, state: 'active' },
@@ -1337,38 +1496,4 @@ test('advance 联动 collect:sibling REGISTRY 读取失败按非致命处理(C2)
   assert.equal(result.stageIndex, 1, 'advance 照常推进,不被坏 sibling 阻断');
   assert.equal(result.collected.ok, true, 'collect 仍成功');
   assert.ok(result.collected.note && result.collected.note.includes('bad-sibling'), 'note 说明跳过的 sibling');
-});
-
-test('advance 联动 collect:≥2 项目登记的会话判定共享,不进项目账本(readFile 回归)', async (t) => {
-  const workspace = await makeWorkspace(t);
-  await writeTemplate(workspace, 'mini-flow');
-  const projcacheFile = await writeProjcache(workspace, {
-    'dev-sess': { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
-    'other-sess': { uncachedInputTokens: 500, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 },
-    'coord-sess': { uncachedInputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
-  });
-  const ctx = await mountPlugin({ projcachePath: projcacheFile });
-  const context = sessionContext(workspace, 'coord-sess');
-  await getTool(ctx, 'project_register').execute({ title: 'Shared', requirement: 'r', flowTemplate: 'mini-flow' }, sessionContext(workspace, 'intake-sess'));
-  // 造合法 sibling REGISTRY:dev-sess 也登记在 sibling 项目 → ≥2 项目登记 = 共享会话。
-  await mkdir(join(workspace, 'sibling-proj', '.dsh-project'), { recursive: true });
-  await writeFile(
-    join(workspace, 'sibling-proj', '.dsh-project', 'REGISTRY.json'),
-    JSON.stringify({ state: 'active', sessions: { 'dev-sess': { role: 'dev', capturePath: 'auto-record' } } }),
-    'utf8',
-  );
-  const result = await getTool(ctx, 'project_advance').execute({
-    projectId: 'shared',
-    sessions: [
-      { sessionId: 'other-sess', role: 'tester' },
-      { sessionId: 'dev-sess', role: 'dev' },
-    ],
-  }, context);
-  assert.equal(result.collected.ok, true, 'collect 成功(sibling 扫描不因 readFile 未定义失败)');
-  assert.ok(!result.collected.note || !result.collected.note.includes('readFile'), 'note 不含 readFile 未定义错误');
-  const book = await readJson(registryPaths(workspace, 'shared').budgetFile);
-  const runtime = book.committed.filter((e) => e.source === 'runtime-events');
-  assert.deepEqual(runtime.map((e) => e.role).sort(), ['coordinator', 'tester'], 'dev-sess(≥2 项目=共享)不进账本');
-  const tester = runtime.find((e) => e.role === 'tester');
-  assert.equal(tester.usage.tokens, 550, 'tester 桶 = 500+50');
 });

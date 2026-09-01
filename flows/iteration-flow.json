@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "id": "iteration-flow",
+  "version": 1,
+  "stages": [
+    { "id": "prelude", "type": "work", "role": "coordinator", "note": "读底座 + 上轮 STATE → 增量更新底座(STATE/DECISIONS),为后续角色提供跨迭代接续上下文" },
+    { "id": "clarify", "type": "work", "role": "product", "produces": ["SPEC.md"], "note": "迭代需求澄清(增量,引用底座避免全量重读);entity 无底座时扩展产出底座初稿四件套" },
+    { "id": "build", "type": "work", "role": "dev", "produces": ["code"] },
+    { "id": "test", "type": "work", "role": "tester" },
+    { "id": "delivery-gate", "type": "gate", "title": "交付验收", "present": ["DELIVERY.md"] },
+    { "id": "wrap", "type": "summary" },
+    { "id": "harvest", "type": "work", "role": "coordinator", "note": "更新底座 STATE/DECISIONS(增量维护,跨迭代存活)" }
+  ]
+}

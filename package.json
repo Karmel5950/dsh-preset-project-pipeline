@@ -1,6 +1,6 @@
 {
   "name": "dsh-preset-project-pipeline",
-  "version": "0.9.0",
+  "version": "0.10.0",
   "private": true,
   "type": "module",
   "description": "preset 源包;版本号用于 deploy 部署戳与 git tag plugindev/project-pipeline/vX.Y.Z"

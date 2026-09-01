@@ -19,6 +19,11 @@
 //   - sessionTokenUsage(projcache, sessionId):取单会话 tokenUsage(有效计费口径);
 //   - aggregateByRole(sessions, projcache):按 REGISTRY.sessions 角色桶聚合 tokenUsage。
 //     零 npm import;可单测(注入临时 projcache 文件)。
+// 0.10.0 新增(项目底座层 Base Dossier P1,2026-09-01):
+//   - MAX_COMPILED_PERSONA=1000(C4a:编译后 persona 头+正文合计上限);
+//   - entitySlugOf / baseDossierPaths / baseDossierExists(实体仓底座四件套路径);
+//   - validateReadings / expandReadings / compileReadingsHeader(role manifest readings 段);
+//   - validateRole 增 readings 只增校验。
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
@@ -29,6 +34,15 @@ export const STAGE_TYPES = ['work', 'gate', 'summary', 'internalize'];
 
 /** 预算 source 口径枚举(钉死;自报/事件实收/消费插件三层共用一本账)。 */
 export const BUDGET_SOURCES = ['self-report', 'runtime-events', 'billing-plugin'];
+
+/**
+ * 编译后 persona 长度上限(C4a 修正:抬至 1000,头+正文合计)。
+ * 背景:readings 头是路径清单不是 persona 正文,历史 300→450→700 本就是渐进放宽的
+ * 纪律参数;1000 字符仍远小于任何会话上下文预算,不改"控制 spawn 上下文成本"的本意。
+ * compileSubagent 把 readings 展开的"进场必读"头前置到 persona 后,若头+正文合计
+ * 超本上限,在 role_show 编译期抛错(不静默截断)。
+ */
+export const MAX_COMPILED_PERSONA = 1000;
 
 /** 卡点分类白名单(= 五维可行性维度 + other;与 project-registry 的 BLOCKER_CATEGORIES 对齐)。 */
 export const BLOCKER_CATEGORIES = [
@@ -192,13 +206,16 @@ export function validateFlow(flow) {
  */
 export function validateRole(role) {
   if (!isPlainObject(role)) return bad('角色清单必须是 JSON 对象');
-  const allowed = new Set(['id', 'summary', 'persona', 'model', 'tools', 'workspace', 'permissions']);
+  const allowed = new Set(['id', 'summary', 'persona', 'model', 'tools', 'workspace', 'permissions', 'readings']);
   for (const key of Object.keys(role)) {
     if (!allowed.has(key)) return bad(`角色清单含未知顶层键 "${key}"`);
   }
   if (!nonEmptyString(role.id)) return bad('角色 id 必填(非空字符串)');
   if (!nonEmptyString(role.summary)) return bad(`角色 ${role.id} 的 summary 必填(一句话)`);
   if (!nonEmptyString(role.persona)) return bad(`角色 ${role.id} 的 persona 必填(非空全文)`);
+  // P1 只增校验:readings 若出现必须是非空字符串数组(路径模板,支持 {{base}}/{{project}})。
+  const readings = validateReadings(role.readings);
+  if (!readings.ok) return bad(`角色 ${role.id} 的 ${readings.error}`);
   if (role.model !== undefined) {
     const model = role.model;
     if (!isPlainObject(model)) return bad(`角色 ${role.id} 的 model 必须是对象`);
@@ -382,6 +399,85 @@ export async function readJson(file) {
 export async function writeJson(file, value) {
   await mkdir(dirname(file), { recursive: true });
   await writeFile(file, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+// ── 实体仓底座 Base Dossier + role readings(P1,2026-09-01)───────────────
+// 底座目录 = 工作区级 <workspace>/.dsh-base/<entitySlug>/(与 .dsh-library 平级),
+// 四件套 MAP/DECISIONS/RUNBOOK/STATE 跨迭代存活、增量维护。entitySlug 过卫兵。
+// role manifest 的 readings 段是路径模板数组(支持 {{base}}/{{project}} 变量),
+// 展开为"进场必读"头拼进 spawn persona(路径非内容,不挤 persona 长度纪律)。
+
+/** entitySlug 卫兵(与 projectId 同款:字母/数字开头,只含字母/数字/连字符)。 */
+const ENTITY_SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9-]*$/;
+
+/**
+ * REGISTRY 的 entitySlug:缺省=项目自身(legacy 兼容,25 存量项目零影响)。
+ * 无 entitySlug 字段或非字符串 → 返回 registry.id。
+ */
+export function entitySlugOf(registry) {
+  if (registry === null || typeof registry !== 'object') return undefined;
+  return typeof registry.entitySlug === 'string' && registry.entitySlug.length > 0
+    ? registry.entitySlug
+    : registry.id;
+}
+
+/**
+ * 底座目录全路径布局(工作区级 .dsh-base/<entitySlug>/)。entitySlug 必须是 slug:
+ * 含路径分隔符或 '..' 一律 throw(路径逃逸兜底,与 registryPaths 同款姿势)。
+ */
+export function baseDossierPaths(workspaceDir, entitySlug) {
+  if (typeof entitySlug !== 'string' || !ENTITY_SLUG_RE.test(entitySlug)) {
+    throw new Error(`entitySlug 非法(只允许字母/数字/连字符且以字母或数字开头):${JSON.stringify(entitySlug ?? null)}`);
+  }
+  const baseDir = join(workspaceDir, '.dsh-base', entitySlug);
+  return {
+    baseDir,
+    mapFile: join(baseDir, 'MAP.md'),
+    decisionsFile: join(baseDir, 'DECISIONS.md'),
+    runbookFile: join(baseDir, 'RUNBOOK.md'),
+    stateFile: join(baseDir, 'STATE.md'),
+  };
+}
+
+/** 底座是否存在(以 STATE.md 存在为准)。 */
+export async function baseDossierExists(workspaceDir, entitySlug) {
+  const paths = baseDossierPaths(workspaceDir, entitySlug);
+  try {
+    await stat(paths.stateFile);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** readings 校验(只增):若出现必须是非空字符串数组,每项非空;缺省通过。 */
+export function validateReadings(readings) {
+  if (readings === undefined) return good(undefined);
+  if (!Array.isArray(readings) || readings.length === 0) return bad('readings 必须是非空字符串数组');
+  if (readings.some((x) => !nonEmptyString(x))) return bad('readings 每项必须是非空字符串');
+  return good(readings);
+}
+
+/**
+ * 展开 readings:把 {{base}}/{{project}} 变量替换为具体路径前缀。
+ * base/project 为路径前缀(相对工作区,如 '.dsh-base/<entity>/' 与 '<projectId>/'),
+ * 未给时保留原模板。返回展开后的路径数组。
+ */
+export function expandReadings(readings, { base, project } = {}) {
+  if (!Array.isArray(readings)) return [];
+  return readings.map((tpl) => {
+    let out = tpl;
+    if (typeof base === 'string' && base.length > 0) out = out.split('{{base}}').join(base);
+    if (typeof project === 'string' && project.length > 0) out = out.split('{{project}}').join(project);
+    return out;
+  });
+}
+
+/** 编译"进场必读"头(供 compileSubagent 用);无 readings → 空串。 */
+export function compileReadingsHeader(readings, { base, project } = {}) {
+  const expanded = expandReadings(readings, { base, project });
+  if (expanded.length === 0) return '';
+  return ['进场必读:', ...expanded.map((p) => `- ${p}`)].join('\n');
 }
 
 // ── 机制1 既定裁决库(2026-08-30 流程补丁)──────────────────────────────────

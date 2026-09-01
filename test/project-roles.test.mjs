@@ -237,7 +237,7 @@ test('每个工具都有纯 JSON Schema 参数与 output.schema/render', async (
   }
 });
 
-test('preset 自带库可读:6 角色 + standard-flow(11 阶段)', async () =>
+test('preset 自带库可读:6 角色 + standard-flow(11 阶段)+ iteration-flow(7 阶段)', async () =>
   withWorkspace(async (workspace) => {
     const { byName } = await mountTools(lib);
     const exec = execFor(workspace);
@@ -258,14 +258,24 @@ test('preset 自带库可读:6 角色 + standard-flow(11 阶段)', async () =>
       assert.ok(shown.subagent.toolFilter.allow.includes('project_budget'), `${role.id} allow 含 project_budget`);
       assert.equal(shown.subagent.agentOptions, undefined, '清单未声明 model 时不应有 agentOptions');
       assert.match(shown.workspaceNote, /\.dsh-project\//);
+      // P1:六角色均带 readings;未给 projectId 时返回原始模板(含 {{base}}/{{project}})。
+      assert.ok(Array.isArray(shown.readings) && shown.readings.length > 0, `${role.id} readings 非空`);
+      assert.ok(shown.readings.every((r) => r.includes('{{base}}') || r.includes('{{project}}')), `${role.id} readings 为原始模板`);
+      // 编译后 persona(进场必读头+正文)不超 MAX_COMPILED_PERSONA(1000)。
+      assert.ok(shown.subagent.persona.length <= 1000, `${role.id} 编译后 persona ≤1000`);
+      assert.ok(shown.subagent.persona.includes('进场必读:'), `${role.id} 编译后 persona 含进场必读头`);
     }
 
     const flows = await byName.flow_list.execute({}, exec);
-    assert.equal(flows.flows.length, 1);
-    assert.equal(flows.flows[0].id, 'standard-flow');
-    assert.equal(flows.flows[0].version, 1);
-    assert.equal(flows.flows[0].source, 'preset');
-    assert.equal(flows.flows[0].stageCount, 11);
+    assert.equal(flows.flows.length, 2, 'standard-flow + iteration-flow');
+    const std = flows.flows.find((f) => f.id === 'standard-flow');
+    assert.equal(std.version, 1);
+    assert.equal(std.source, 'preset');
+    assert.equal(std.stageCount, 11);
+    const iter = flows.flows.find((f) => f.id === 'iteration-flow');
+    assert.equal(iter.version, 1);
+    assert.equal(iter.source, 'preset');
+    assert.equal(iter.stageCount, 7);
 
     const flow = await byName.flow_show.execute({ flow: 'standard-flow' }, exec);
     assert.deepEqual(
@@ -276,6 +286,16 @@ test('preset 自带库可读:6 角色 + standard-flow(11 阶段)', async () =>
     assert.equal(accept.role, 'product');
     assert.match(accept.note, /代用户首轮验收/);
     assert.equal(flow.stages.find((stage) => stage.id === 'harvest').type, 'internalize');
+
+    const iterFlow = await byName.flow_show.execute({ flow: 'iteration-flow' }, exec);
+    assert.deepEqual(
+      iterFlow.stages.map((stage) => stage.id),
+      ['prelude', 'clarify', 'build', 'test', 'delivery-gate', 'wrap', 'harvest'],
+    );
+    assert.equal(iterFlow.stages[0].type, 'work', 'prelude 是 work(不加新阶段类型)');
+    assert.equal(iterFlow.stages[0].role, 'coordinator');
+    assert.equal(iterFlow.stages[6].type, 'work', 'harvest 是 work(更新底座)');
+    assert.equal(iterFlow.stages[6].role, 'coordinator');
   }));
 
 test('库合并:workspace 覆盖 preset(同 id workspace 胜),workspace 新增条目可见', async () =>
@@ -319,9 +339,12 @@ test('库合并:workspace 覆盖 preset(同 id workspace 胜),workspace 新增�
     assert.ok(shown.workspaceNote.includes('demo-proj'), '提供 projectId 时说明含真实项目 id');
 
     const flows = await byName.flow_list.execute({}, exec);
-    assert.equal(flows.flows.length, 1);
-    assert.equal(flows.flows[0].source, 'workspace');
-    assert.equal(flows.flows[0].stageCount, 2, 'workspace 同 id 模板覆盖 preset');
+    assert.equal(flows.flows.length, 2, 'standard-flow(workspace 覆盖)+ iteration-flow(preset)');
+    const std = flows.flows.find((f) => f.id === 'standard-flow');
+    assert.equal(std.source, 'workspace');
+    assert.equal(std.stageCount, 2, 'workspace 同 id 模板覆盖 preset');
+    const iter = flows.flows.find((f) => f.id === 'iteration-flow');
+    assert.equal(iter.source, 'preset', 'iteration-flow 保留 preset 源');
   }));
 
 test('坏清单条目跳过且 errors 上报,不炸工具(角色 + 流程)', async () =>
@@ -596,3 +619,73 @@ test('R4-AC5 通用两行已物理移除(无 toolName: subagent / subagent_fork)
   assert.ok(!/toolName:\s*subagent\b/.test(text), '不应存在 toolName: subagent(词边界,避免误匹配 subagent_*)');
   assert.ok(!text.includes('subagent_fork'), '全文件不应出现 subagent_fork');
 });
+
+// ---------------------------------------------------------------------------
+// P1 readings 编译(项目底座层 Base Dossier,2026-09-01)。
+// ---------------------------------------------------------------------------
+
+test('role_show 给 projectId:readings 展开为具体路径清单,编译后 persona 含进场必读头', async () =>
+  withWorkspace(async (workspace) => {
+    // 建一个项目登记簿(entitySlug=shared-entity),供 role_show 读 entitySlug。
+    await writeJsonFile(path.join(workspace, 'proj-a', '.dsh-project', 'REGISTRY.json'), {
+      schemaVersion: 2,
+      id: 'proj-a',
+      entitySlug: 'shared-entity',
+      title: 'Proj A',
+      state: 'active',
+      iteration: 1,
+      stageIndex: 0,
+    });
+    const { byName } = await mountTools(lib);
+    const shown = await byName.role_show.execute({ role: 'dev', projectId: 'proj-a' }, execFor(workspace));
+    // readings 展开:{{base}} → .dsh-base/shared-entity/,{{project}} → proj-a/
+    assert.ok(Array.isArray(shown.readings), 'readings 应为数组');
+    assert.ok(shown.readings.includes('.dsh-base/shared-entity/MAP.md'), '{{base}} 展开为 .dsh-base/<entity>/');
+    assert.ok(shown.readings.includes('proj-a/SPEC.md'), '{{project}} 展开为 <projectId>/');
+    assert.ok(shown.readings.every((r) => !r.includes('{{')), '展开后不含未替换变量');
+    // 编译后 persona 含进场必读头 + 具体路径。
+    assert.ok(shown.subagent.persona.includes('进场必读:'), '编译后 persona 含进场必读头');
+    assert.ok(shown.subagent.persona.includes('.dsh-base/shared-entity/MAP.md'), '编译后 persona 含展开路径');
+    assert.ok(shown.subagent.persona.length <= 1000, '编译后 persona ≤1000');
+  }));
+
+test('role_show 给 projectId:登记簿读不到 entitySlug → 缺省=项目自身', async () =>
+  withWorkspace(async (workspace) => {
+    // 无登记簿(或读不到)→ entitySlug 缺省=项目自身。
+    const { byName } = await mountTools(lib);
+    const shown = await byName.role_show.execute({ role: 'dev', projectId: 'ghost-proj' }, execFor(workspace));
+    assert.ok(shown.readings.includes('.dsh-base/ghost-proj/MAP.md'), '读不到登记簿 → entitySlug=项目自身');
+  }));
+
+test('compileSubagent:readings 编译超限(>MAX_COMPILED_PERSONA)在 role_show 编译期抛错', async () =>
+  withWorkspace(async (workspace) => {
+    // 造一个 readings 极长的角色(路径模板超长 → 编译后 persona 超 1000)。
+    const longPath = '{{base}}/' + 'x'.repeat(1200) + '.md';
+    await writeJsonFile(path.join(workspace, '.dsh-library', 'roles', 'long-readings.json'), {
+      id: 'long-readings',
+      summary: 'readings 超长的角色',
+      persona: '你是测试角色。',
+      readings: [longPath],
+      tools: { allow: ['read'] },
+    });
+    const { byName } = await mountTools(lib);
+    await assert.rejects(
+      () => byName.role_show.execute({ role: 'long-readings', projectId: 'proj-a' }, execFor(workspace)),
+      /超限/,
+      '编译后 persona 超限应抛错(不静默截断)',
+    );
+  }));
+
+test('role_show:无 readings 的角色(如 modeled)编译后 persona 无进场必读头,行为不变', async () =>
+  withWorkspace(async (workspace) => {
+    await writeJsonFile(path.join(workspace, '.dsh-library', 'roles', 'no-readings.json'), {
+      id: 'no-readings',
+      summary: '无 readings 的角色',
+      persona: '你是无 readings 的角色。',
+      tools: { allow: ['read'] },
+    });
+    const { byName } = await mountTools(lib);
+    const shown = await byName.role_show.execute({ role: 'no-readings', projectId: 'proj-a' }, execFor(workspace));
+    assert.equal(shown.readings, undefined, '无 readings → readings 字段缺省');
+    assert.equal(shown.subagent.persona, '你是无 readings 的角色。', '无 readings → persona 原样,不加头');
+  }));

@@ -39,6 +39,13 @@
 //     按角色分桶写 committed(source=runtime-events);R2 替换语义(移除全部 runtime-events
 //     条目重写,同一 sessionId 不双重计数);intake 及共享会话只进工作区级 sharedOnce。
 //   - config 增 projcachePath(显式优先)+ env DSH_HOME 回退;读时守卫 unit.version。
+// 0.10.0 新增(项目底座层 Base Dossier P1,2026-09-01):
+//   - assertRegistry 兼容 schemaVersion ∈ {1, 2}(C3:读旧登记簿不报错、写回不迁移);
+//   - register 增 entity 入参(entity-slug,缺省=项目自身);写 schemaVersion=2 + entitySlug;
+//     检测底座存在性,回执 baseDossier{entity,path,exists,draftNeeded};新 entity 时扩展
+//     clarify 阶段 produces 产出底座初稿四件套(流程数据表达,不加新阶段类型);
+//   - status 单项目详情增 entitySlug(经 entitySlugOf);
+//   - MANUAL_TEXT 增「底座 Base Dossier」小节。
 
 import { existsSync, readFileSync } from 'node:fs';
 import { appendFile, mkdir, readdir, writeFile } from 'node:fs/promises';
@@ -48,6 +55,9 @@ import {
   BUDGET_SOURCES,
   STAGE_TYPES,
   aggregateByRole,
+  baseDossierExists,
+  baseDossierPaths,
+  entitySlugOf,
   readJson,
   readProjcache,
   registryPaths,
@@ -196,8 +206,9 @@ function safeProjectId(projectId) {
 // ── 登记簿 JSON 读取卫兵 ────────────────────────────────────────────────────
 
 function assertRegistry(value, file) {
-  if (!isPlainObject(value) || value.schemaVersion !== 1) {
-    throw new Error(`${name}: 登记簿不认识或已损坏(schemaVersion 必须=1):${file}`);
+  // C3 兼容:接受 schemaVersion ∈ {1, 2}(旧 1 与新 2 都能读;写回不迁移)。
+  if (!isPlainObject(value) || (value.schemaVersion !== 1 && value.schemaVersion !== 2)) {
+    throw new Error(`${name}: 登记簿不认识或已损坏(schemaVersion 必须=1 或 2):${file}`);
   }
 }
 
@@ -428,7 +439,7 @@ function makeApi({ cfg, presetDir, logger }) {
       const regFile = join(workspaceDir, sid, cfg.registryDir, 'REGISTRY.json');
       let sibling;
       try {
-        sibling = JSON.parse(readFileSync(regFile, 'utf8'));
+        sibling = JSON.parse(await readFile(regFile, 'utf8'));
       } catch (error) {
         notes.push(`跳过 sibling ${sid}(REGISTRY 读取失败:${error?.code ?? error?.message ?? error})`);
         continue;
@@ -500,6 +511,10 @@ function makeApi({ cfg, presetDir, logger }) {
     if (args.parked !== undefined && typeof args.parked !== 'boolean') {
       throw new Error(`${name}/project_register: parked 必须是布尔值(默认 false)`);
     }
+    // P1:entity 入参(可选,entity-slug,过卫兵)。缺省=项目自身。
+    if (args.entity !== undefined && (typeof args.entity !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(args.entity))) {
+      throw new Error(`${name}/project_register: entity 非法(只允许字母/数字/连字符,且以字母或数字开头;含路径分隔符或 ".." 一律拒绝):${JSON.stringify(args.entity ?? null)}`);
+    }
     let customStages;
     if (args.flowStages !== undefined) {
       const checked = validateStageList(args.flowStages);
@@ -548,9 +563,15 @@ function makeApi({ cfg, presetDir, logger }) {
     }
 
     const now = new Date().toISOString();
+    // P1:entitySlug = args.entity ?? projectId(缺省=项目自身);底座存在性检测(以 STATE.md 为准)。
+    const entitySlug = typeof args.entity === 'string' && args.entity.length > 0 ? args.entity : projectId;
+    const basePaths = baseDossierPaths(workspaceDir, entitySlug);
+    const baseExists = await baseDossierExists(workspaceDir, entitySlug);
+    const draftNeeded = !baseExists;
     const registry = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       id: projectId,
+      entitySlug,
       title: args.title,
       createdAt: now,
       updatedAt: now,
@@ -563,6 +584,15 @@ function makeApi({ cfg, presetDir, logger }) {
     };
     // 会话登记(兜底 auto-record):register 调用方 = intake。
     recordSession(registry, sessionIdOf(context), 'intake', 'auto-record', now);
+    // 底座初稿生成路径(流程数据表达,不加新阶段类型):entity 无底座时扩展 clarify 阶段
+    // produces(只改数据,不改阶段类型)。克隆 stages 避免污染模板对象。
+    if (draftNeeded) {
+      const idx = stages.findIndex((s) => s.id === 'clarify' && s.type === 'work');
+      if (idx >= 0) {
+        const baseProduces = ['base-dossier/MAP.md', 'base-dossier/DECISIONS.md', 'base-dossier/RUNBOOK.md', 'base-dossier/STATE.md'];
+        stages = stages.map((s, i) => (i === idx ? { ...s, produces: [...(Array.isArray(s.produces) ? s.produces : []), ...baseProduces] } : s));
+      }
+    }
     const flow = { schemaVersion: 1, id: flowId, version: flowVersion, stages, source: flowSource, revision: 1 };
     const budget = { schemaVersion: 1, estimate: args.budgetEstimate ?? null, cap: null, committed: [] };
 
@@ -583,6 +613,12 @@ function makeApi({ cfg, presetDir, logger }) {
       state: registry.state,
       flowSummary: stages.map((stage, index) => stageBrief(stage, index)),
       nextStage: stageBrief(stages[0], 0),
+      baseDossier: {
+        entity: entitySlug,
+        path: basePaths.baseDir,
+        exists: baseExists,
+        draftNeeded,
+      },
     };
   }
 
@@ -1000,6 +1036,7 @@ function makeApi({ cfg, presetDir, logger }) {
       return {
         project: {
           projectId: registry.id,
+          entitySlug: entitySlugOf(registry) ?? registry.id,
           title: registry.title ?? '',
           state: registry.state,
           iteration: registry.iteration,
@@ -1251,6 +1288,7 @@ function projectDetailSchema() {
     additionalProperties: false,
     properties: {
       projectId: { type: 'string' },
+      entitySlug: { type: 'string' },
       title: { type: 'string' },
       state: { type: 'string' },
       iteration: { type: 'integer' },
@@ -1263,7 +1301,21 @@ function projectDetailSchema() {
       summaryExists: { type: 'boolean' },
       openBlockers: { type: 'integer' },
     },
-    required: ['projectId', 'title', 'state', 'iteration', 'stageIndex', 'gateStatus', 'updatedAt', 'flowRef', 'currentStage', 'budget', 'summaryExists', 'openBlockers'],
+    required: ['projectId', 'entitySlug', 'title', 'state', 'iteration', 'stageIndex', 'gateStatus', 'updatedAt', 'flowRef', 'currentStage', 'budget', 'summaryExists', 'openBlockers'],
+  };
+}
+
+function baseDossierSchema() {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      entity: { type: 'string' },
+      path: { type: 'string' },
+      exists: { type: 'boolean' },
+      draftNeeded: { type: 'boolean' },
+    },
+    required: ['entity', 'path', 'exists', 'draftNeeded'],
   };
 }
 
@@ -1276,8 +1328,9 @@ const REGISTER_OUTPUT_SCHEMA = {
     state: { type: 'string', enum: ['active', 'parked'] },
     flowSummary: { type: 'array', items: stageBriefSchema() },
     nextStage: stageBriefSchema(),
+    baseDossier: baseDossierSchema(),
   },
-  required: ['projectId', 'projectDir', 'state', 'flowSummary', 'nextStage'],
+  required: ['projectId', 'projectDir', 'state', 'flowSummary', 'nextStage', 'baseDossier'],
 };
 
 function collectedSchema() {
@@ -1377,15 +1430,22 @@ const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
 
 ### 登记簿布局
 每个项目一个目录:<workspace>/<projectId>/.dsh-project/:
-- REGISTRY.json:项目元数据(id/标题/流程指针 stageIndex/迭代 iteration/门禁态 gateStatus/状态 state)
+- REGISTRY.json:项目元数据(id/标题/流程指针 stageIndex/迭代 iteration/门禁态 gateStatus/状态 state/entitySlug)
 - FLOW.json:流程实例(模板实例化产物,可带项目内修订,revision 递增)
 - REQUIREMENT.md:需求原文(逐字);BUDGET.json:预算账本;SUMMARY.md:总结链
 - journal/NN-<stageId>.md:逐阶段日志(推进时自动开条,角色补写产出与结论)
 - gates/NN-<stageId>.md:门禁包与裁决记录;feedback/NN.md:验收反馈登记
 角色库与流程库在 <workspace>/.dsh-library/(roles|flows),workspace 同名条目覆盖 preset 自带。
 
+### 底座 Base Dossier(实体仓底座,P1)
+- 位置:<workspace>/.dsh-base/<entitySlug>/(与 .dsh-library 平级,工作区级;entitySlug 过卫兵)。
+- 四件套:MAP.md 模块地图 / DECISIONS.md 决策日志(append-only,带日期与迭代引用)/ RUNBOOK.md 运行手册(命令级)/ STATE.md 状态快照(最近交付/已知问题/债,带 last-verified 戳)。跨迭代存活、增量维护。
+- REGISTRY.entitySlug(schemaVersion 1→2 只增):缺省=项目自身;25 存量项目无 entitySlug 视为 legacy,零影响。
+- project_register 可传 entity(entity-slug,缺省=项目自身):entity 已有底座 → 回执 baseDossier.exists=true;没有 → draftNeeded=true,首轮 clarify 阶段 produces 扩展底座初稿四件套(流程数据表达,不加新阶段类型)。
+- role manifest 的 readings 段(路径模板数组,支持 {{base}}/{{project}} 变量):compileSubagent 展开为"进场必读"头拼进 spawn persona;readings 是路径非内容,不挤 persona 长度纪律;编译后 persona(头+正文)超 MAX_COMPILED_PERSONA(1000)在 role_show 编译期报错。
+
 ### 工具速查(登记簿 6 + 库 4)
-1. project_register:登记新项目。title+requirement 必填;flowTemplate 选模板(默认 standard-flow)或给 flowStages 现场定制;可带 budgetEstimate;可带 parked(默认 false,true → state='parked' 入册不 spawn)。**中文 title 建议配显式 id 入参(格式 [a-z0-9-]+)**:提供 id 时 projectId=uniqueProjectId(workspaceDir, id),title 自由中文;纯中文 title 未提供 id 会拒收并提示提供 id(不引入拼音依赖);混合 title(含 ASCII 片段)未提供 id 维持现状 slugify。返回项目 id、state 与流程概要。
+1. project_register:登记新项目。title+requirement 必填;flowTemplate 选模板(默认 standard-flow)或给 flowStages 现场定制;可带 budgetEstimate;可带 parked(默认 false,true → state='parked' 入册不 spawn);可带 entity(entity-slug,缺省=项目自身,已有底座 → 回执 baseDossier.exists=true,没有 → draftNeeded=true 且 clarify 扩展产出底座初稿)。**中文 title 建议配显式 id 入参(格式 [a-z0-9-]+)**:提供 id 时 projectId=uniqueProjectId(workspaceDir, id),title 自由中文;纯中文 title 未提供 id 会拒收并提示提供 id(不引入拼音依赖);混合 title(含 ASCII 片段)未提供 id 维持现状 slugify。返回项目 id、state、流程概要、底座信息。
 2. project_advance:推进到下一阶段。**存在未解决卡点(project_block)会拒绝**;门禁 pending 会拒绝;**门禁未呈递(gateStatus=null)也会拒绝**——必须先 present 呈递并等用户裁决(2026-08-29 实测收紧:协调者曾未呈递直接穿过门禁);approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1);在最后阶段不给 appendStages = 结项(state→delivered,此后不可再推进)。**parked 项目只能经 activate:true 激活(parked→active,stageIndex=0),否则一律拒绝**。常规推进自动写 journal;结项不写 journal、返回 delivered:true。**可带 sessions:[{sessionId,role}] 登记 spawn 返回的 subagentId(主路会话捕获)**;推进时自动归集本项目私有会话真实 tokenUsage 写 committed(source=runtime-events),返回 collected 状态。
 3. project_gate:门禁两步。present 把摘要/材料/建议写成门禁包并置 pending;decide 记录用户裁决(approve/revise/reject),revise 必给 reviseTo(流程中已有的 work 阶段 id),reject 使项目终态。
 4. project_budget:get 查账(含 totals);set-estimate / set-cap 设估算与上限;commit 逐阶段上报消耗(stageId/role/usage,source 默认 self-report)。**source='runtime-events' 且 usage 缺省时插件按调用者会话 id 读 projcache 自动填真实 token 四桶**。
@@ -1489,7 +1549,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register({
     name: 'project_register',
-    description: '登记新项目:创建 <workspace>/<projectId>/.dsh-project 登记簿骨架(REGISTRY/FLOW/BUDGET/REQUIREMENT.md),按模板或定制阶段实例化流程,返回项目 id、state 与流程概要。projectId 由标题清洗为 kebab slug,冲突自动 -2 递增;可传显式 id(英文 slug)与中文 title 解耦。parked:true → state=parked(入册不 spawn,看板进暂存区)。',
+    description: '登记新项目:创建 <workspace>/<projectId>/.dsh-project 登记簿骨架(REGISTRY/FLOW/BUDGET/REQUIREMENT.md),按模板或定制阶段实例化流程,返回项目 id、state、流程概要与底座信息。projectId 由标题清洗为 kebab slug,冲突自动 -2 递增;可传显式 id(英文 slug)与中文 title 解耦。可传 entity(entity-slug,缺省=项目自身):entity 已有底座 → 回执 baseDossier.exists=true;没有 → draftNeeded=true 且 clarify 阶段 produces 扩展底座初稿四件套(流程数据表达,不加新阶段类型)。parked:true → state=parked(入册不 spawn,看板进暂存区)。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -1497,6 +1557,7 @@ export function apply(ctx, config = {}) {
         title: { type: 'string', description: '项目标题(必填非空),可自由中文;未传 id 时清洗为 ASCII kebab 目录名。' },
         id: { type: 'string', description: '可选显式英文 slug id(格式 [a-z0-9-]+,小写、字母/数字开头、只含小写字母/数字/连字符;含路径分隔符或 ".." 拒绝)。提供时 projectId=uniqueProjectId(workspaceDir, id),title 自由中文;纯中文 title 未提供 id 会拒收并提示提供 id。' },
         requirement: { type: 'string', description: '需求原文,逐字登记进 REQUIREMENT.md。' },
+        entity: { type: 'string', description: '可选 entity-slug(字母/数字开头,只含字母/数字/连字符;含路径分隔符或 ".." 拒绝)。缺省=项目自身。entity 已有底座 → 回执 baseDossier.exists=true;没有 → draftNeeded=true,首轮 clarify 扩展产出底座初稿四件套到 <workspace>/.dsh-base/<entity>/。' },
         flowTemplate: { type: 'string', description: '流程模板 id,默认 standard-flow;模板来自 workspace/.dsh-library/flows 与 preset 自带 flows。' },
         flowStages: {
           type: 'array',
@@ -1513,6 +1574,7 @@ export function apply(ctx, config = {}) {
       render: (_args, value) => [{ type: 'text', text: [
         `已登记项目 ${value.projectId}(目录:${value.projectDir},state=${value.state})`,
         `流程共 ${value.flowSummary.length} 个阶段;下一阶段 #${value.nextStage.index + 1} ${value.nextStage.id}(${stageTypeLabel(value.nextStage.type)}${value.nextStage.role ? ` · ${value.nextStage.role}` : ''})。`,
+        `底座(entity=${value.baseDossier.entity}):${value.baseDossier.exists ? `已存在(${value.baseDossier.path})` : `无底座,需首轮 clarify 产出初稿(${value.baseDossier.path})`}`,
         value.state === 'parked' ? '项目处于暂存(parked)状态:已入册,未激活,不 spawn 协调者;激活请用 project_advance(projectId, activate:true)。' : '',
       ].filter(Boolean).join('\n') }],
     },
