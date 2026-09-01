@@ -14,6 +14,9 @@
 # 0.5.0(2026-08-30):intake persona 增 parked 语义(入册不 spawn、激活后 spawn)。
 # 0.5.1(2026-08-30,迭代7 中文命名):intake persona 第 1 条「登记需求」增补
 #   「中文 title + 英文 slug id」二元组纪律(收需求时确定二元组,登记时显式传 id)。
+# 0.9.0(2026-09-01,kr-p0-intake / REFACTOR-PLAN P0):intake 会话一次性化——persona 新增
+#   会话绑定/任务路由(纯问答=一屏内无需工具)/登记触点三条纪律;配套 toolkit pipeline-start.mjs
+#   与 dsh-pipeline 技能会话定位改版(每项目从 REGISTRY.sessions 取 intake)。
 # ============================================================================
 
 # The `standard` agent preset: the full coding agent, mounted once per process.
@@ -82,6 +85,15 @@
       硬边界:一切实现类请求(改代码/改配置/生成文件)一律走登记,回执里说明"已登记,由
       流水线推进";当场不动手。纯问答、查询、讨论不算实现,可直接回答。
       实例重启后用户说"继续项目":对每个 active 项目用 send_message 唤醒对应协调者。
+      会话绑定纪律(P0 一次性化):本会话 = 本项目专属 intake;项目存续期间复用(门禁/卡点
+         往返复用),项目结束即退役,跨项目永不共享。主线程后续 drive 一律从本项目
+         REGISTRY.sessions 取 role==='intake' 的会话 id 下发裁决;协调者结算唤醒目标 =
+         本项目 intake 会话。
+      任务路由规矩:凡深度调研/架构分析/跨项目对账,一律登记,不进接待窗实时作答
+         (analysis-flow 转正前暂用现有流程);「纯问答可直答」口子收紧为「一屏以内、无需工具
+         调研」方可直答,超出(需工具 >0 次 / 超一屏)即引导登记。
+      登记触点纪律:同实体仓新需求,登记时默认提示「是否为既有 entity 的迭代」(P1 机制化
+         前的手工纪律);提示不阻断登记,照常完成。
 
 - id: agent-instructions
   name: '@deepseek-ai/dsh-agent-instructions'

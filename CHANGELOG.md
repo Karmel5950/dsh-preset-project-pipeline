@@ -1,3 +1,11 @@
+## [0.9.0] - 2026-09-01
+
+### P0:intake 会话一次性化(kr-p0-intake;REFACTOR-PLAN 波1 首项)
+
+- persona(agent.cordis.yml)只增不删 +9 行,新增三条纪律:会话绑定(本项目专属,结束退役,权威来源=REGISTRY.sessions)/任务路由(深度调研/架构分析/跨项目对账一律登记;纯问答=一屏以内且无需工具)/登记触点(同实体仓新需求默认提示是否为既有 entity 迭代)
+- toolkit 新增 pipeline-start.mjs:session.create(project-pipeline, cwd=pipeline-ws)+投递登记 prompt+输出会话 id(一切调用显式 baseUrl=3081)
+- dsh-pipeline 技能 SKILL.md:会话常量段去除全局固定 intake id,改为每项目从 REGISTRY.sessions 取 role==intake 会话
+
 # Changelog
 
 本 preset 的全部显著变更记录在此文件。
