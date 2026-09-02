@@ -1442,7 +1442,7 @@ const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
 - 四件套:MAP.md 模块地图 / DECISIONS.md 决策日志(append-only,带日期与迭代引用)/ RUNBOOK.md 运行手册(命令级)/ STATE.md 状态快照(最近交付/已知问题/债,带 last-verified 戳)。跨迭代存活、增量维护。
 - REGISTRY.entitySlug(schemaVersion 1→2 只增):缺省=项目自身;25 存量项目无 entitySlug 视为 legacy,零影响。
 - project_register 可传 entity(entity-slug,缺省=项目自身):entity 已有底座 → 回执 baseDossier.exists=true;没有 → draftNeeded=true,首轮 clarify 阶段 produces 扩展底座初稿四件套(流程数据表达,不加新阶段类型)。
-- role manifest 的 readings 段(路径模板数组,支持 {{base}}/{{project}} 变量):compileSubagent 展开为"进场必读"头拼进 spawn persona;readings 是路径非内容,不挤 persona 长度纪律;编译后 persona(头+正文)超 MAX_COMPILED_PERSONA(1000)在 role_show 编译期报错。
+- role manifest 的 readings 段(路径模板数组,支持 {base}/{project} 变量):compileSubagent 展开为"进场必读"头拼进 spawn persona;readings 是路径非内容,不挤 persona 长度纪律;编译后 persona(头+正文)超 MAX_COMPILED_PERSONA(1000)在 role_show 编译期报错。
 
 ### 工具速查(登记簿 6 + 库 4)
 1. project_register:登记新项目。title+requirement 必填;flowTemplate 选模板(默认 standard-flow)或给 flowStages 现场定制;可带 budgetEstimate;可带 parked(默认 false,true → state='parked' 入册不 spawn);可带 entity(entity-slug,缺省=项目自身,已有底座 → 回执 baseDossier.exists=true,没有 → draftNeeded=true 且 clarify 扩展产出底座初稿)。**中文 title 建议配显式 id 入参(格式 [a-z0-9-]+)**:提供 id 时 projectId=uniqueProjectId(workspaceDir, id),title 自由中文;纯中文 title 未提供 id 会拒收并提示提供 id(不引入拼音依赖);混合 title(含 ASCII 片段)未提供 id 维持现状 slugify。返回项目 id、state、流程概要、底座信息。
