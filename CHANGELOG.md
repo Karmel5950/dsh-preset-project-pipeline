@@ -2,6 +2,20 @@
 
 本 preset 的全部显著变更记录在此文件。
 
+## [0.12.0] - 2026-09-02
+
+成本计量 v2:统一 token 口径与模型来源(kr-cost-v2 交付;背景:预算账本 tokens(外层)与 uncachedInput+output(明细)双口径混用、projcache 无 model 字段、无单一权威总消耗公式)。
+
+- **统一总 token 口径(totalToken,单一权威)**:project-lib 新增纯函数 `totalToken(usage) = uncachedInputTokens + cacheReadTokens + outputTokens`(non-number→0,不含 cacheWrite);「预算上报纪律」规定所有外层/明细/查询的"总 token"一律走该纯函数,严禁第二套公式(AC-R1)。legacy `tokens` 字段保留仅 read 兼容,不再作展示/查询总消耗口径。新增 `cacheRate` 纯函数 = cacheRead/(cacheRead+uncachedInput)(cacheRead≤0/分母0→0)。
+- **model 来源落地(D1,AC-R3)**:A 路 `project_budget commit(source=runtime-events,usage 缺省)` 自动填桶扩四桶 + `model`/`provider`,来源 = 上报会话 agent 路由(`agent.options.{provider,model}` / `session.requestHeader().config.{provider,model}`),可选经 `ctx.get('llm')?.resolveModelInfo(provider,model)` 规范名增强(try/catch 降级原始路由串);**取不到一律显式 `model:'unknown'`**,严禁伪造/静默缺省(命中 unsupported-degradation)。B 路 `advance` 联动 collect 从被移除的 A 路条目按 session carry-forward 溯源并入角色桶;无溯源 → `'unknown'`;**禁止用协调者自身路由冒充角色桶**。
+- **D4 兼容归一(AC-R2)**:BUDGET committed usage 只增 `cacheReadTokens?/cacheWriteTokens?/model?/provider?`,存量条目缺字段按 0/null/'unknown' 兼容读,不重写/不迁移既有字段。project-lib 新增 `normalizeUsage`(任意旧/新形状→六桶+model+provider)、`modelLabel`('unknown' 哨兵)、`aggregateByModel`(按 model 分组聚合)。
+- **外层展示承载于工具输出(D3)**:`project_budget get` 的 totals 增 `totalToken`/`byModel`/`cacheRate`/`byRoleTotal`;`project_status` 单项目详情 project.budget 增 `totalToken` 与按 role 的 `byRoleTotal` 展开。看板渲染侧(host-plugins/project-hub)**本轮不触**。budgetTotalsSchema/budgetSnapshotSchema 扩展。
+- **MANUAL_TEXT 增补**:「统一总 token 口径与缓存率」「model 来源说明」两小节 + 工具速查/预算上报纪律同步。
+- 版本 0.11.0 → **0.12.0(minor)**:统一 token 口径 + model 来源 + 按 model 分组 = 能力新增。
+- 测试:project-lib 22→28 / project-registry 62→67(preset 全量 153 例 + verify-c4c ALL_PASS)。既有注册/commit/collect 断言随 usage 扩展同步更新(selftest-must-cover-repo-test-files)。model happy path/unknown 兜底/carry-forward/totals 统一口径均有断言。
+- **AC-R7 真机验证(r4)**:三层输出(BUDGET/看板/查询)正确性 = 用户侧 blocking 执行,流水线只做单测/静态核对。
+- 触点:presets/project-pipeline/(project-lib.mjs、project-registry.mjs、MANUAL_TEXT、test/)→ **r2 交付 deliverables/+APPLY.md** + **r3 deploy 至 IN SYNC + 重启**(重启窗口并入攒批,与 kr-p4-route 合并一次重启)。
+
 ## [0.11.0] - 2026-09-02
 
 记忆治理·消费路由优先(kr-p4-route 交付;背景:lessons/rulings 无代码消费=死档案,治理没人读的库没有意义——先路由后治理)。

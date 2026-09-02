@@ -33,6 +33,12 @@
 //   - lessons-index 消费路由索引:buildLessonsIndex / bumpLessonHits / validateLessonsIndex(均纯函数)。
 //     结构 schemaVersion=1,{ categories: { <category>: [{ id, kind, title, premises, status, origin, hits }] } }。
 //     hits 初始 0;rebuild 保留既有 hits、新增篇目 hits=0;kind=lesson/pattern 统一归类不按 kind 分叉。
+// 0.12.0 新增(成本计量 v2 kr-cost-v2,2026-09-02):
+//   - totalToken(usage)=uncachedInput+cacheRead+output(权威总 token,单一口径);
+//   - cacheRate(usage)=cacheRead/(cacheRead+uncachedInput),cacheRead<=0/分母0→0;
+//   - normalizeUsage(任意旧/新形状→六桶+model+provider,兼容读)/ modelLabel(model,'unknown' 哨兵);
+//   - aggregateByModel(按 model 分组聚合,未知归 'unknown');
+//   - aggregateByRole 扩展:桶增 cacheRead/cacheWrite 与 model 溯源透传位(可选 modelProvenance carry-forward)。
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
@@ -952,22 +958,162 @@ export function sessionTokenUsage(projcache, sessionId) {
 /**
  * 按 REGISTRY.sessions 的角色桶聚合 tokenUsage。
  * sessions = { [sessionId]: { role } };projcache = readProjcache 的 data。
- * 返回 { [role]: { tokens, uncachedInputTokens, outputTokens, sessionCount } }。
+ * 返回 { [role]: { tokens, uncachedInputTokens, outputTokens, cacheReadTokens,
+ *   cacheWriteTokens, sessionCount, model, provider } }(cost-v2 扩展:桶含 cacheRead/
+ *   cacheWrite 与 model 溯源透传位)。
  * 会话不在 projcache 表内 → 跳过(不计数)。
+ * model 溯源(modelProvenance):{ [sessionId]: { model, provider } },来自被移除的
+ *   A 路 runtime-events 条目 carry-forward。桶内 model 去重(保序)后:无溯源 → 'unknown';
+ *   单标 → 原样;多标 → 'A/B' 连接。provider 随 model(多标时以 '/' 连无值则 null)。
  */
-export function aggregateByRole(sessions, projcache) {
+export function aggregateByRole(sessions, projcache, modelProvenance = null) {
   const out = {};
   if (sessions === null || typeof sessions !== 'object') return out;
+  // 归一化 modelProvenance(容忍两种形状:直接 { sid -> {model,provider} } 或包 bySession)。
+  const prov = {};
+  if (modelProvenance !== null && typeof modelProvenance === 'object') {
+    const src = modelProvenance.bySession ?? modelProvenance;
+    for (const [sid, p] of Object.entries(src)) {
+      if (typeof p?.model === 'string' && p.model.length > 0) prov[sid] = { model: p.model, provider: typeof p.provider === 'string' ? p.provider : null };
+    }
+  }
   for (const [sessionId, meta] of Object.entries(sessions)) {
     const role = meta?.role;
     if (typeof role !== 'string' || role.length === 0) continue;
     const usage = sessionTokenUsage(projcache, sessionId);
     if (usage === null) continue;
-    const bucket = out[role] ?? (out[role] = { tokens: 0, uncachedInputTokens: 0, outputTokens: 0, sessionCount: 0 });
+    const bucket = out[role] ?? (out[role] = {
+      tokens: 0, uncachedInputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0, sessionCount: 0,
+      _models: [],
+    });
     bucket.tokens += usage.uncachedInputTokens + usage.outputTokens;
     bucket.uncachedInputTokens += usage.uncachedInputTokens;
     bucket.outputTokens += usage.outputTokens;
+    bucket.cacheReadTokens += usage.cacheReadTokens;
+    bucket.cacheWriteTokens += usage.cacheWriteTokens;
     bucket.sessionCount += 1;
+    const p = prov[sessionId];
+    if (p) bucket._models.push(p);
+  }
+  for (const bucket of Object.values(out)) {
+    const seen = new Map();
+    for (const p of bucket._models) if (!seen.has(p.model)) seen.set(p.model, p.provider);
+    if (seen.size === 0) {
+      bucket.model = 'unknown';
+      bucket.provider = null;
+    } else if (seen.size === 1) {
+      const [[m, pr]] = [...seen.entries()];
+      bucket.model = m;
+      bucket.provider = pr ?? null;
+    } else {
+      bucket.model = [...seen.keys()].join('/');
+      bucket.provider = [...seen.values()].filter(Boolean).join('/') || null;
+    }
+    delete bucket._models;
+  }
+  return out;
+}
+
+// ── 统一 token 口径与模型来源(cost-v2,2026-09-02)─────────────────────────
+// D2:totalToken = uncachedInputTokens + cacheReadTokens + outputTokens(纯函数,单一权威);
+//     cacheRate = cacheRead/(cacheRead+uncachedInput),cacheRead<=0/分母0 → 0。
+// D4:normalizeUsage 读任意旧/新形状 committed usage → 规范化六桶(legacy tokens+
+//     四桶+sessionCount)+ model(+provider);model 缺省显式 'unknown'(非静默、非报错)。
+// 全部只增不改、零 npm import;消费方统一走这些纯函数,不硬编码第二套口径(AC-R1)。
+
+/** non-number 且非有限数 → 0(兼容读,不炸)。 */
+function finiteNum(v) {
+  return typeof v === 'number' && Number.isFinite(v) ? v : 0;
+}
+
+/**
+ * 权威总 token(totalToken):uncachedInputTokens + cacheReadTokens + outputTokens。
+ * non-number → 0;不含 cacheWriteTokens(写缓存不构成当前会话消耗)。所有消费方只用本函数。
+ */
+export function totalToken(usage) {
+  if (usage === null || typeof usage !== 'object') return 0;
+  return finiteNum(usage.uncachedInputTokens) + finiteNum(usage.cacheReadTokens) + finiteNum(usage.outputTokens);
+}
+
+/**
+ * 缓存率:cacheRead / (cacheRead + uncachedInput),分子分母同源(与 totalToken 自洽)。
+ * cacheRead <= 0 或分母为 0 → 返回 0(当前实例 cacheRead=0,故恒 0,语义正确而非低估)。
+ */
+export function cacheRate(usage) {
+  if (usage === null || typeof usage !== 'object') return 0;
+  const cacheRead = finiteNum(usage.cacheReadTokens);
+  if (cacheRead <= 0) return 0;
+  const uncachedInput = finiteNum(usage.uncachedInputTokens);
+  if (cacheRead + uncachedInput === 0) return 0;
+  return cacheRead / (cacheRead + uncachedInput);
+}
+
+/**
+ * model 哨兵(标签):undefined/null/'' → 'unknown';有值 → 原样。provider 暂作签名预留
+ * (随 model 一起标注,供将来 provider/model 复合标签扩展,不改变本函数返回值)。
+ */
+export function modelLabel(model, provider) {
+  return typeof model === 'string' && model.length > 0 ? model : 'unknown';
+}
+
+/**
+ * 归一化任意旧/新形状 committed usage(D4 兼容读,只增不改不迁移):
+ * 新形状(四桶+model/provider)原样;旧形状(tokens/uncachedInput/output,无 cacheRead/
+ * cacheWrite/model)按 0/null/'unknown' 兼容;非对象按全 0 + 'unknown' 兜底。
+ * 返回 { tokens, uncachedInputTokens, outputTokens, cacheReadTokens, cacheWriteTokens,
+ *        sessionCount, sessionId?, model, provider }。
+ * legacy tokens 仅 read 兼容:存量有则原样(0.8.0 计费口径),无则按 uncachedInput+output。
+ */
+export function normalizeUsage(usage) {
+  if (usage === null || typeof usage !== 'object') {
+    return {
+      tokens: 0, uncachedInputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0, sessionCount: 0,
+      model: 'unknown', provider: null,
+    };
+  }
+  const uncachedInput = finiteNum(usage.uncachedInputTokens);
+  const output = finiteNum(usage.outputTokens);
+  const legacyTokens = finiteNum(usage.tokens);
+  const tokens = typeof usage.tokens === 'number' && Number.isFinite(usage.tokens)
+    ? usage.tokens
+    : uncachedInput + output;
+  const out = {
+    tokens,
+    uncachedInputTokens: uncachedInput,
+    outputTokens: output,
+    cacheReadTokens: finiteNum(usage.cacheReadTokens),
+    cacheWriteTokens: finiteNum(usage.cacheWriteTokens),
+    sessionCount: finiteNum(usage.sessionCount),
+    model: modelLabel(usage.model, usage.provider),
+    provider: typeof usage.provider === 'string' && usage.provider.length > 0 ? usage.provider : null,
+  };
+  if (typeof usage.sessionId === 'string' && usage.sessionId.length > 0) out.sessionId = usage.sessionId;
+  return out;
+}
+
+/**
+ * 按 model 分组聚合(byModel)。committed 为 committed 条目数组;逐条 normalizeUsage(entry.usage)
+ * 取 model 归类;缺/未知 model → 'unknown' 桶。返回 { <model>: { totalToken, tokens,
+ * uncachedInputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, entries } }。
+ */
+export function aggregateByModel(committed) {
+  const out = {};
+  const list = Array.isArray(committed) ? committed : [];
+  for (const entry of list) {
+    const usage = normalizeUsage(entry?.usage);
+    const bucket = out[usage.model] ?? (out[usage.model] = {
+      totalToken: 0, tokens: 0, uncachedInputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0, entries: 0,
+    });
+    bucket.totalToken += totalToken(usage);
+    bucket.tokens += usage.tokens;
+    bucket.uncachedInputTokens += usage.uncachedInputTokens;
+    bucket.outputTokens += usage.outputTokens;
+    bucket.cacheReadTokens += usage.cacheReadTokens;
+    bucket.cacheWriteTokens += usage.cacheWriteTokens;
+    bucket.entries += 1;
   }
   return out;
 }

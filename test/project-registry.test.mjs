@@ -25,6 +25,7 @@ import {
   resolveLibrary,
   slugify,
   slugifyStrict,
+  totalToken,
   validateFlow,
   validateRole,
   validateStageList,
@@ -46,9 +47,22 @@ const sessionContext = (workspace, sessionId) => ({
   agent: { session: { header: { cwd: workspace, ...(sessionId ? { id: sessionId } : {}) } } },
 });
 
+/** cost-v2 新增:带 agent 路由的会话桩,供 model happy path(seam = options / requestHeader().config)。 */
+const sessionContextWithRoute = (workspace, sessionId, { provider, model }) => ({
+  agent: {
+    options: { provider, model },
+    session: {
+      header: { cwd: workspace, ...(sessionId ? { id: sessionId } : {}) },
+      requestHeader: () => ({ config: { provider, model } }),
+    },
+  },
+});
+
 async function mountPlugin(config = {}) {
-  const ctx = makeStubCtx();
-  await apply(ctx, config);
+  // cost-v2:支持注入 services(如 llm mock 供 ctx.get('llm').resolveModelInfo 增强路径测试)。
+  const { services, ...cfg } = config;
+  const ctx = makeStubCtx({ services: services || {} });
+  await apply(ctx, cfg);
   return ctx;
 }
 
@@ -151,7 +165,7 @@ test('插件元数据:7 个工具 + 1 条手册提示段(注册常驻,不接线 
   const section = ctx.systemPrompt.items[0];
   assert.equal(section.name, 'project-pipeline/manual');
   assert.equal(section.order, 140);
-  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'project_harvest', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked', 'id 入参', 'runtime-events', 'projcache', 'sessions', '底座', 'entitySlug', 'readings', 'MAX_COMPILED_PERSONA', '消费路由', 'negative-premises', 'lessons-index']) {
+  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'project_harvest', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked', 'id 入参', 'runtime-events', 'projcache', 'sessions', '底座', 'entitySlug', 'readings', 'MAX_COMPILED_PERSONA', '消费路由', 'negative-premises', 'lessons-index', 'totalToken', 'cacheRate', 'byModel', 'unknown', 'model 来源说明']) {
     assert.ok(section.text.includes(word), `手册段应包含 ${word}`);
   }
 });
@@ -770,7 +784,7 @@ test('project_budget:set-estimate/set-cap/commit/get 与 totals 聚合', async (
   const context = sessionContext(workspace);
   const budgetTool = getTool(ctx, 'project_budget');
   const empty = await budgetTool.execute({ projectId, action: 'get' }, context);
-  assert.deepEqual(empty.totals, { entries: 0, byRole: {}, bySource: {} });
+  assert.deepEqual(empty.totals, { entries: 0, byRole: {}, bySource: {}, totalToken: 0, byModel: {}, cacheRate: 0, byRoleTotal: {} });
   await budgetTool.execute({ projectId, action: 'set-estimate', estimate: { tokens: 5000 } }, context);
   await budgetTool.execute({ projectId, action: 'set-cap', cap: { tokens: 50000 } }, context);
   await budgetTool.execute({
@@ -787,10 +801,16 @@ test('project_budget:set-estimate/set-cap/commit/get 与 totals 聚合', async (
   assert.equal(book.committed.length, 2);
   assert.equal(book.committed[0].source, 'self-report', 'source 默认 self-report');
   assert.equal(book.committed[0].iteration, 1);
+  // cost-v2:totals 增统一总 token totalToken / byModel / cacheRate / byRoleTotal。
+  // 两条 usage 均非 projcache 口径(无 token 桶)→ totalToken=0,byModel 归 unknown 桶。
   assert.deepEqual(book.totals, {
     entries: 2,
     byRole: { dev: 1, tester: 1 },
     bySource: { 'self-report': 1, 'runtime-events': 1 },
+    totalToken: 0,
+    byModel: { unknown: { totalToken: 0, tokens: 0, uncachedInputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, entries: 2 } },
+    cacheRate: 0,
+    byRoleTotal: { dev: 0, tester: 0 },
   });
   const saved = await readJson(registryPaths(workspace, projectId).budgetFile);
   assert.equal(saved.committed.length, 2);
@@ -1358,11 +1378,16 @@ test('commit 自动填:source=runtime-events 且 usage 缺省 → 按调用者�
   assert.equal(book.committed.length, 1);
   const entry = book.committed[0];
   assert.equal(entry.source, 'runtime-events');
+  // cost-v2:A 路自动填桶扩四桶 + model/provider;默认 sessionContext 桩无 agent 路由 → model 'unknown'。
   assert.deepEqual(entry.usage, {
     tokens: 120,
     uncachedInputTokens: 100,
     outputTokens: 20,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
     sessionId: 'dev-sess',
+    model: 'unknown',
+    provider: null,
   });
   assert.ok(entry.asOf, 'runtime-events 条目应带 asOf');
   assert.ok(entry.projcacheMtime, 'runtime-events 条目应带 projcacheMtime');
@@ -1434,6 +1459,12 @@ test('advance 联动 collect:重算私有会话真实 tokenUsage 按角色分桶
   assert.equal(dev.usage.tokens, 120, 'dev 桶 = 100+20');
   assert.equal(coord.usage.tokens, 340, 'coordinator 桶 = 300+40');
   assert.ok(dev.asOf && dev.projcacheMtime, 'collect 条目应带 asOf/projcacheMtime');
+  // cost-v2:B 路桶扩四桶 + model/provider;无 A 路溯源 → 'unknown'。
+  assert.equal(dev.usage.cacheReadTokens, 0);
+  assert.equal(dev.usage.cacheWriteTokens, 0);
+  assert.equal(dev.usage.model, 'unknown', '无 A 路溯源桶 → unknown');
+  assert.equal(dev.usage.provider, null);
+  assert.equal(coord.usage.model, 'unknown');
 });
 
 test('advance 联动 collect:R2 替换语义——移除全部 runtime-events 条目重写,同一 sessionId 不重复计数', async (t) => {
@@ -1463,6 +1494,9 @@ test('advance 联动 collect:R2 替换语义——移除全部 runtime-events �
   assert.equal(runtime.length, 1, 'R2 替换后仅一条 runtime-events(dev 桶)');
   assert.equal(runtime[0].role, 'dev');
   assert.equal(runtime[0].usage.tokens, 120, '同一 sessionId 只计一次,不双重计数(120 而非 240)');
+  // cost-v2:A 路条目(默认桩无路由 → model unknown)carry-forward 到 dev 桶。
+  assert.equal(runtime[0].usage.model, 'unknown');
+  assert.equal(runtime[0].usage.cacheReadTokens, 0);
 });
 
 test('advance 联动 collect:projcache 缺失/读失败 → 非致命,advance 照常推进,note 说明', async (t) => {
@@ -1497,4 +1531,140 @@ test('advance 联动 collect:sibling REGISTRY 读取失败按非致命处理(C2)
   assert.equal(result.stageIndex, 1, 'advance 照常推进,不被坏 sibling 阻断');
   assert.equal(result.collected.ok, true, 'collect 仍成功');
   assert.ok(result.collected.note && result.collected.note.includes('bad-sibling'), 'note 说明跳过的 sibling');
+});
+
+// ── cost-v2:model 来源 seam(A 路)/B 路 carry-forward/totals 统一总 token ──
+
+test('A 路 commit:带 agent 路由会话 → model/provider 落条目(happy path,经 options/requestHeader seam)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const projcacheFile = await writeProjcache(workspace, {
+    'dev-sess': { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 30, cacheWriteTokens: 5 },
+  });
+  const ctx = await mountPlugin({ projcachePath: projcacheFile });
+  const context = sessionContextWithRoute(workspace, 'dev-sess', { provider: 'ollama-cloud', model: 'deepseek-v4-flash' });
+  await getTool(ctx, 'project_register').execute({ title: 'Model Route', requirement: 'r', flowTemplate: 'mini-flow' }, sessionContext(workspace, 'intake-sess'));
+  const book = await getTool(ctx, 'project_budget').execute({
+    projectId: 'model-route',
+    action: 'commit',
+    entry: { stageId: 'do', role: 'dev', source: 'runtime-events' },
+  }, context);
+  const entry = book.committed[0];
+  assert.equal(entry.usage.model, 'deepseek-v4-flash', 'model 取 agent 路由');
+  assert.equal(entry.usage.provider, 'ollama-cloud');
+  assert.equal(entry.usage.cacheReadTokens, 30, '四桶含 cacheRead');
+  assert.equal(entry.usage.cacheWriteTokens, 5);
+  assert.equal(totalToken(entry.usage), 150, 'totalToken = 100+30+20(不含 cacheWrite)');
+});
+
+test('A 路 commit:llm 服务 resolveModelInfo 规范名增强(ctx.get(llm));服务缺失安全降级', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const projcacheFile = await writeProjcache(workspace, {
+    'dev-sess': { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  });
+  // 注入 llm mock:resolveModelInfo 返回规范名(供增强路径)。
+  const llmMock = {
+    async resolveModelInfo(provider, model) {
+      assert.equal(provider, 'ollama-cloud');
+      return { provider, id: 'deepseek-v4-flash-canon', name: 'DeepSeek V4 Flash' };
+    },
+  };
+  const ctx = await mountPlugin({ projcachePath: projcacheFile, services: { llm: llmMock } });
+  const context = sessionContextWithRoute(workspace, 'dev-sess', { provider: 'ollama-cloud', model: 'deepseek-v4-flash' });
+  await getTool(ctx, 'project_register').execute({ title: 'Llm Enhance', requirement: 'r', flowTemplate: 'mini-flow' }, sessionContext(workspace, 'intake-sess'));
+  const book = await getTool(ctx, 'project_budget').execute({
+    projectId: 'llm-enhance',
+    action: 'commit',
+    entry: { stageId: 'do', role: 'dev', source: 'runtime-events' },
+  }, context);
+  assert.equal(book.committed[0].usage.model, 'deepseek-v4-flash-canon', 'resolveModelInfo 解析出的规范 id');
+  // 服务缺失(llm 未注入)→ 走 ctx.get(llm) 返回 undefined 的安全降级 → 保留原始路由串。
+  const ctx2 = await mountPlugin({ projcachePath: projcacheFile });
+  await getTool(ctx2, 'project_register').execute({ title: 'No Llm', requirement: 'r', flowTemplate: 'mini-flow' }, sessionContext(workspace, 'intake-sess'));
+  const book2 = await getTool(ctx2, 'project_budget').execute({
+    projectId: 'no-llm',
+    action: 'commit',
+    entry: { stageId: 'do', role: 'dev', source: 'runtime-events' },
+  }, sessionContextWithRoute(workspace, 'dev-sess', { provider: 'ollama-cloud', model: 'deepseek-v4-flash' }));
+  assert.equal(book2.committed[0].usage.model, 'deepseek-v4-flash', '无 llm 服务 → 回落原始路由串');
+});
+
+test('B 路 collect:carry-forward 溯源——A 路带 model 的条目在重写后并入同 role 桶;协调者桶不冒充', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const projcacheFile = await writeProjcache(workspace, {
+    'dev-sess': { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    'coord-sess': { uncachedInputTokens: 300, outputTokens: 40, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  });
+  const ctx = await mountPlugin({ projcachePath: projcacheFile });
+  // registration + A 路 commit 用带路由上下文(dev 会话,model gpt-x);collect 由 coordinator 会话触发。
+  await getTool(ctx, 'project_register').execute({ title: 'Carry', requirement: 'r', flowTemplate: 'mini-flow' }, sessionContext(workspace, 'intake-sess'));
+  await getTool(ctx, 'project_budget').execute({
+    projectId: 'carry',
+    action: 'commit',
+    entry: { stageId: 'do', role: 'dev', source: 'runtime-events' },
+  }, sessionContextWithRoute(workspace, 'dev-sess', { provider: 'openai', model: 'gpt-x' }));
+  await getTool(ctx, 'project_advance').execute({
+    projectId: 'carry',
+    sessions: [{ sessionId: 'dev-sess', role: 'dev' }],
+  }, sessionContextWithRoute(workspace, 'coord-sess', { provider: 'coord-provider', model: 'coord-model' }));
+  const book = await readJson(registryPaths(workspace, 'carry').budgetFile);
+  const runtime = book.committed.filter((e) => e.source === 'runtime-events');
+  const dev = runtime.find((e) => e.role === 'dev');
+  assert.ok(dev, 'dev 桶存在');
+  assert.equal(dev.usage.model, 'gpt-x', 'A 路 model carry-forward 入 dev 桶');
+  assert.equal(dev.usage.provider, 'openai');
+  // 协调者会话有真实 usage 但无 A 路溯源 → 'unknown'。即便协调者带自己路由,桶 model 也不取它。
+  const coord = runtime.find((e) => e.role === 'coordinator');
+  assert.ok(coord, 'coordinator 桶存在(projcache 有真值)');
+  assert.equal(coord.usage.model, 'unknown', '禁止用协调者自身路由冒充角色桶');
+  assert.equal(coord.usage.provider, null);
+});
+
+test('project_budget get 的 totals:统一总 token(含 cacheRead)+ 按 model 分组 + 缓存率', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const projcacheFile = await writeProjcache(workspace, {
+    'dev-sess': { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 40, cacheWriteTokens: 0 },
+    'tester-sess': { uncachedInputTokens: 200, outputTokens: 30, cacheReadTokens: 60, cacheWriteTokens: 0 },
+  });
+  const ctx = await mountPlugin({ projcachePath: projcacheFile });
+  await getTool(ctx, 'project_register').execute({ title: 'Totals', requirement: 'r', flowTemplate: 'mini-flow' }, sessionContext(workspace, 'intake-sess'));
+  await getTool(ctx, 'project_budget').execute({
+    projectId: 'totals',
+    action: 'commit',
+    entry: { stageId: 'do', role: 'dev', source: 'runtime-events' },
+  }, sessionContextWithRoute(workspace, 'dev-sess', { provider: 'a', model: 'm1' }));
+  await getTool(ctx, 'project_budget').execute({
+    projectId: 'totals',
+    action: 'commit',
+    entry: { stageId: 'do', role: 'tester', source: 'runtime-events' },
+  }, sessionContextWithRoute(workspace, 'tester-sess', { provider: 'a', model: 'm1' }));
+  const book = await getTool(ctx, 'project_budget').execute({ projectId: 'totals', action: 'get' }, sessionContext(workspace, 'any'));
+  // dev 桶 totalToken = 100+40+20=160;tester = 200+60+30=290;合计 450。
+  assert.equal(book.totals.totalToken, 450, 'totalToken = sum(uncached+cacheRead+output)');
+  assert.ok(Number.isFinite(book.totals.cacheRate), 'cacheRate 存在');
+  // byModel:m1(dev+tester)聚合 = 450。
+  assert.equal(book.totals.byModel.m1.totalToken, 450);
+  assert.equal(book.totals.byModel.m1.entries, 2);
+});
+
+test('project_status 详情 project.budget 增 totalToken 与按 role 展开(byRoleTotal)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const projcacheFile = await writeProjcache(workspace, {
+    'dev-sess': { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 40, cacheWriteTokens: 0 },
+  });
+  const ctx = await mountPlugin({ projcachePath: projcacheFile });
+  await getTool(ctx, 'project_register').execute({ title: 'St Totals', requirement: 'r', flowTemplate: 'mini-flow' }, sessionContext(workspace, 'intake-sess'));
+  await getTool(ctx, 'project_budget').execute({
+    projectId: 'st-totals',
+    action: 'commit',
+    entry: { stageId: 'do', role: 'dev', source: 'runtime-events' },
+  }, sessionContextWithRoute(workspace, 'dev-sess', { provider: 'a', model: 'm1' }));
+  const detail = await getTool(ctx, 'project_status').execute({ projectId: 'st-totals' }, sessionContext(workspace));
+  assert.equal(detail.project.budget.totals.totalToken, 160, 'status 详情含统一总 token');
+  assert.deepEqual(detail.project.budget.totals.byRoleTotal, { dev: 160 });
+  assert.ok(detail.project.budget.totals.byModel.m1, 'byModel 透传');
 });

@@ -53,6 +53,16 @@
 //     兼容任意扩展,疑问 4 定稿);
 //   - 新增 project_harvest 工具(action=rebuild-index 扫 lessons/patterns 按元数据归类
 //     建 lessons-index.json 保留 hits + bump-hits 递增);MANUAL_TEXT 工具速查补条目。
+// 0.12.0 新增(成本计量 v2 kr-cost-v2,2026-09-02):
+//   - A 路 commit(source=runtime-events,usage 缺省)自动填桶扩四桶:cacheReadTokens/cacheWriteTokens
+//     + model/provider(经模型 seam:agent 路由 options/session.requestHeader().config,可选
+//     ctx.get('llm').resolveModelInfo 规范名增强,取不到显式 'unknown').
+//   - B 路 collect carry-forward 溯源:重写前从被移除 runtime-events 条目按 session 收集
+//     model 溯源并入角色桶(无溯源 → 'unknown');禁止用协调者路由冒充角色桶.
+//   - project_budget get 的 totals 增 totalToken(单一权威总 token 纯函数 sum)+ byModel + cacheRate;
+//     project_status 详情 project.budget 增 totalToken + 按 role 的 totalToken 展开(byRoleTotal).
+//   - budgetTotalsSchema/budgetSnapshotSchema 扩展;MANUAL_TEXT 补「统一总 token 口径与缓存率」
+//     「model 来源说明」小节;makeApi 增 ctx(供 modelRoute 经 ctx.get('llm') 增强).
 
 import { existsSync, readFileSync } from 'node:fs';
 import { appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
@@ -61,10 +71,13 @@ import { fileURLToPath } from 'node:url';
 import {
   BUDGET_SOURCES,
   STAGE_TYPES,
+  aggregateByModel,
   aggregateByRole,
   baseDossierExists,
   baseDossierPaths,
+  cacheRate,
   entitySlugOf,
+  normalizeUsage,
   readJson,
   readProjcache,
   registryPaths,
@@ -73,6 +86,7 @@ import {
   sessionTokenUsage,
   slugify,
   slugifyStrict,
+  totalToken,
   validateStageList,
   buildLessonsIndex,
   bumpLessonHits,
@@ -186,6 +200,44 @@ function sessionWorkspace(context) {
 /** 会话 id(硬归属):工具 execute 第二参 context.agent.session.header.id。 */
 function sessionIdOf(context) {
   return context?.agent?.session?.header?.id;
+}
+
+/**
+ * model 捕获 seam(D1 定案,2026-09-02):model 来源 = 上报会话的 agent 路由——
+ *   优先 session.requestHeader()?.config.{provider,model},回退 agent.options.{provider,model}。
+ *   可选经 ctx.get('llm').resolveModelInfo(provider, model) 解析规范 {id} 增强
+ *   (try/catch 降级:异常/拒绝/服务缺失 → 用原始路由串,不伪造)。
+ * 取不到 → { model:'unknown', provider:null }(显式标注,命中 unsupported-degradation)。
+ * 严禁伪造/静默缺省;禁止用协调者/其他会话路由冒充本会话角色桶。
+ */
+async function modelRoute(ctx, context) {
+  const agent = context?.agent;
+  let routed;
+  try {
+    routed = agent?.session?.requestHeader?.()?.config ?? {};
+  } catch {
+    routed = {};
+  }
+  const opts = agent?.options ?? {};
+  const provider = routed.provider ?? opts.provider;
+  const model = routed.model ?? opts.model;
+  if (typeof model !== 'string' || model.length === 0) {
+    return { model: 'unknown', provider: null };
+  }
+  let label = model;
+  const providerOut = typeof provider === 'string' && provider.length > 0 ? provider : null;
+  try {
+    const llm = ctx?.get?.('llm');
+    if (llm && typeof llm.resolveModelInfo === 'function') {
+      const info = await llm.resolveModelInfo(provider, model);
+      if (info !== null && typeof info === 'object' && typeof info.id === 'string' && info.id.length > 0) {
+        label = info.id; // 规范名增强;info.name 亦可备将来展示(此处 label 取 id)
+      }
+    }
+  } catch {
+    // 降级:保留原始路由串 model,不伪造、不抛。
+  }
+  return { model: label, provider: providerOut };
 }
 
 /**
@@ -355,21 +407,45 @@ function journalHead(registry, stage, stageIndex, total, now, note) {
 
 // ── 预算聚合 ────────────────────────────────────────────────────────────────
 
-/** totals:committed 逐条计数聚合(usage 形状自由,工具不解释,不做数值聚合)。 */
+/**
+ * totals:committed 逐条计数聚合 + 统一总 token 口径(cost-v2)。
+ * 返回 { entries, byRole(计数), bySource(计数),
+ *        totalToken(权威总 token 纯函数 sum), byModel(按 model 分组聚合),
+ *        cacheRate(聚合缓存率), byRoleTotal(按 role 的 totalToken 展开) }。
+ * 所有数值展示统一走 project-lib 的 totalToken()/cacheRate() 纯函数,不硬编码第二套口径(AC-R1)。
+ */
 function budgetTotals(budget) {
   const committed = Array.isArray(budget?.committed) ? budget.committed : [];
   const byRole = {};
   const bySource = {};
+  const byRoleTotal = {};
+  let totalTokenSum = 0;
+  let aggCacheRead = 0;
+  let aggUncachedInput = 0;
   for (const entry of committed) {
     byRole[entry.role] = (byRole[entry.role] ?? 0) + 1;
     bySource[entry.source] = (bySource[entry.source] ?? 0) + 1;
+    const tt = totalToken(entry.usage);
+    totalTokenSum += tt;
+    byRoleTotal[entry.role] = (byRoleTotal[entry.role] ?? 0) + tt;
+    const n = normalizeUsage(entry.usage);
+    aggCacheRead += n.cacheReadTokens;
+    aggUncachedInput += n.uncachedInputTokens;
   }
-  return { entries: committed.length, byRole, bySource };
+  return {
+    entries: committed.length,
+    byRole,
+    bySource,
+    totalToken: totalTokenSum,
+    byModel: aggregateByModel(committed),
+    cacheRate: cacheRate({ cacheReadTokens: aggCacheRead, uncachedInputTokens: aggUncachedInput }),
+    byRoleTotal,
+  };
 }
 
-// ── 工具实现(经 makeApi 闭包持有 cfg/presetDir/logger)────────────────────
+// ── 工具实现(经 makeApi 闭包持有 cfg/presetDir/logger/ctx)────────────────
 
-function makeApi({ cfg, presetDir, logger }) {
+function makeApi({ cfg, presetDir, logger, ctx }) {
   /** 登记簿路径(尊重 config.registryDir 覆盖;默认与 lib 布局一致)。 */
   function pathsFor(workspaceDir, projectId) {
     const base = registryPaths(workspaceDir, projectId);
@@ -479,11 +555,24 @@ function makeApi({ cfg, presetDir, logger }) {
     } catch (error) {
       return { ok: false, buckets: {}, note: `projcache 读取失败,跳过归集:${error?.message ?? error}` };
     }
-    // 5. 按角色聚合。
-    const buckets = aggregateByRole(privateSessions, projcache.data);
-    // 6. R2 替换:移除全部 runtime-events 条目,重写每桶一条(含 asOf/projcacheMtime)。
+    // 5. 读 budgetBook,取将被移除的 runtime-events 条目 → carry-forward model 溯源。
+    //    model 来源只能由上报会话(角色本会话)在 A 路 commit 时捕获,collect(协调者会话)
+    //    无法从 projcache 重建;故从被移除的 A 路条目按 session 收集 {model,provider} 并入桶
+    //    (D1-A/B 定案);禁止用协调者自身路由冒充角色桶模型。
     const budgetBook = await readJson(paths.budgetFile);
     if (!Array.isArray(budgetBook.committed)) budgetBook.committed = [];
+    const provBySession = {};
+    for (const e of budgetBook.committed) {
+      if (e?.source !== 'runtime-events') continue;
+      const sid = e?.usage?.sessionId;
+      const model = e?.usage?.model;
+      if (typeof sid === 'string' && typeof model === 'string' && model.length > 0 && provBySession[sid] === undefined) {
+        provBySession[sid] = { model, provider: typeof e?.usage?.provider === 'string' ? e.usage.provider : null };
+      }
+    }
+    // 6. 按角色聚合(带 cacheRead/cacheWrite + model 溯源透传位)。
+    const buckets = aggregateByRole(privateSessions, projcache.data, { bySession: provBySession });
+    // 7. R2 替换:移除全部 runtime-events 条目,重写每桶一条(含 asOf/projcacheMtime)。
     const kept = budgetBook.committed.filter((e) => e?.source !== 'runtime-events');
     const now = new Date().toISOString();
     for (const [role, bucket] of Object.entries(buckets)) {
@@ -496,7 +585,11 @@ function makeApi({ cfg, presetDir, logger }) {
           tokens: bucket.tokens,
           uncachedInputTokens: bucket.uncachedInputTokens,
           outputTokens: bucket.outputTokens,
+          cacheReadTokens: bucket.cacheReadTokens,
+          cacheWriteTokens: bucket.cacheWriteTokens,
           sessionCount: bucket.sessionCount,
+          model: bucket.model,
+          provider: bucket.provider,
         },
         source: 'runtime-events',
         asOf: now,
@@ -990,11 +1083,19 @@ function makeApi({ cfg, presetDir, logger }) {
         if (tu === null) {
           throw new Error(`${name}/project_budget: 调用者会话 ${callerSession} 不在 projcache 表内,无法自动填桶`);
         }
+        // cost-v2(D1/D4):A 路自动填桶扩四桶 + model/provider。model 来自本会话 agent 路由
+        // (options / session.requestHeader().config),可选经 ctx.get('llm').resolveModelInfo
+        // 规范名增强;取不到显式 'unknown'(严禁伪造/用协调者路由冒充)。
+        const route = await modelRoute(ctx, context);
         usage = {
           tokens: tu.uncachedInputTokens + tu.outputTokens,
           uncachedInputTokens: tu.uncachedInputTokens,
           outputTokens: tu.outputTokens,
+          cacheReadTokens: tu.cacheReadTokens,
+          cacheWriteTokens: tu.cacheWriteTokens,
           sessionId: callerSession,
+          model: route.model,
+          provider: route.provider,
         };
         asOf = new Date().toISOString();
         projcacheMtime = projcache.mtime;
@@ -1397,6 +1498,10 @@ function budgetTotalsSchema() {
       entries: { type: 'integer' },
       byRole: { type: 'object' },
       bySource: { type: 'object' },
+      totalToken: { type: 'number', description: '统一总 token 口径(纯函数 sum = uncachedInput+cacheRead+output)。' },
+      byModel: { type: 'object', description: '按 model 分组聚合(缺/未知 model 归 "unknown")。' },
+      cacheRate: { type: 'number', description: '聚合缓存率 = cacheRead/(cacheRead+uncachedInput)。' },
+      byRoleTotal: { type: 'object', description: '按 role 的 totalToken 展开。' },
     },
     required: ['entries', 'byRole', 'bySource'],
   };
@@ -1616,12 +1721,12 @@ const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
 1. project_register:登记新项目。title+requirement 必填;flowTemplate 选模板(默认 standard-flow)或给 flowStages 现场定制;可带 budgetEstimate;可带 parked(默认 false,true → state='parked' 入册不 spawn);可带 entity(entity-slug,缺省=项目自身,已有底座 → 回执 baseDossier.exists=true,没有 → draftNeeded=true 且 clarify 扩展产出底座初稿)。**中文 title 建议配显式 id 入参(格式 [a-z0-9-]+)**:提供 id 时 projectId=uniqueProjectId(workspaceDir, id),title 自由中文;纯中文 title 未提供 id 会拒收并提示提供 id(不引入拼音依赖);混合 title(含 ASCII 片段)未提供 id 维持现状 slugify。返回项目 id、state、流程概要、底座信息。
 2. project_advance:推进到下一阶段。**存在未解决卡点(project_block)会拒绝**;门禁 pending 会拒绝;**门禁未呈递(gateStatus=null)也会拒绝**——必须先 present 呈递并等用户裁决(2026-08-29 实测收紧:协调者曾未呈递直接穿过门禁);approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1);在最后阶段不给 appendStages = 结项(state→delivered,此后不可再推进)。**parked 项目只能经 activate:true 激活(parked→active,stageIndex=0),否则一律拒绝**。常规推进自动写 journal;结项不写 journal、返回 delivered:true。**可带 sessions:[{sessionId,role}] 登记 spawn 返回的 subagentId(主路会话捕获)**;推进时自动归集本项目私有会话真实 tokenUsage 写 committed(source=runtime-events),返回 collected 状态。
 3. project_gate:门禁两步。present 把摘要/材料/建议写成门禁包并置 pending;decide 记录用户裁决(approve/revise/reject),revise 必给 reviseTo(流程中已有的 work 阶段 id),reject 使项目终态。
-4. project_budget:get 查账(含 totals);set-estimate / set-cap 设估算与上限;commit 逐阶段上报消耗(stageId/role/usage,source 默认 self-report)。**source='runtime-events' 且 usage 缺省时插件按调用者会话 id 读 projcache 自动填真实 token 四桶**。
-5. project_status:不带 projectId 列出工作区全部项目(含未解决卡点数);带 projectId 看单项目详情(当前阶段/门禁态/预算聚合/SUMMARY 是否存在/卡点数)。
+4. project_budget:get 查账(totals 含统一总 token totalToken / 按 model 分组 byModel / 缓存率 cacheRate / 按 role 展开 byRoleTotal);set-estimate / set-cap 设估算与上限;commit 逐阶段上报消耗(stageId/role/usage,source 默认 self-report)。**source='runtime-events' 且 usage 缺省时插件按调用者会话 id 读 projcache 自动填真实 token(四桶+model/provider,model 取本会话 agent 路由)**。
+5. project_status:不带 projectId 列出工作区全部项目(含未解决卡点数);带 projectId 看单项目详情(当前阶段/门禁态/预算聚合(含统一总 token)/SUMMARY 是否存在/卡点数)。
 6. project_block:卡点通道(优先上报,禁止降级)。report 登记(category=核心集(五维+other)+ .dsh-library/categories.json 扩展,运行时按合并集校验)并卡住推进;resolve 记录用户裁决结论后解卡;list 查看。
 7. project_harvest:维护 lessons 消费路由索引(AC1,harvest 阶段调用)。rebuild-index 扫 lessons/ + patterns/ 读元数据按 category 归类重建 lessons-index.json(保留既有 hits);bump-hits(lessonRefs:[id])递增命中篇目 hits。
-8. project_budget:get 查账(含 totals);set-estimate / set-cap 设估算与上限;commit 逐阶段上报消耗(stageId/role/usage,source 默认 self-report)。**source='runtime-events' 且 usage 缺省时插件按调用者会话 id 读 projcache 自动填真实 token 四桶**。
-9. project_status:不带 projectId 列出工作区全部项目(含未解决卡点数);带 projectId 看单项目详情(当前阶段/门禁态/预算聚合/SUMMARY 是否存在/卡点数)。
+8. project_budget:get 查账(totals 含统一总 token totalToken / 按 model 分组 byModel / 缓存率 cacheRate / 按 role 展开 byRoleTotal);set-estimate / set-cap 设估算与上限;commit 逐阶段上报消耗(stageId/role/usage,source 默认 self-report)。**source='runtime-events' 且 usage 缺省时插件按调用者会话 id 读 projcache 自动填真实 token(四桶+model/provider,model 取本会话 agent 路由)**。
+9. project_status:不带 projectId 列出工作区全部项目(含未解决卡点数);带 projectId 看单项目详情(当前阶段/门禁态/预算聚合(含统一总 token)/SUMMARY 是否存在/卡点数)。
 10. role_list / role_show:查角色清单;role_show 返回可直接拷进 subagent 调用的参数(persona/toolFilter/agentOptions)与 workspaceNote。
 11. flow_list / flow_show:查流程模板(含 stageCount/stages),workspace 库覆盖 preset 自带。
 
@@ -1708,6 +1813,23 @@ source='runtime-events' 且 usage 缺省时插件按调用者会话 id 读 projc
 advance 结算联动自动归集:重算本项目私有会话真实 tokenUsage 按角色分桶写 committed(source=runtime-events),
 同一会话不双重计数;intake 及共享会话只进工作区级汇总(sharedOnce)。estimate/cap 形状自由,工具不解释其内容。
 
+### 统一总 token 口径与缓存率(cost-v2)
+- **权威总 token(totalToken)** = uncachedInputTokens + cacheReadTokens + outputTokens(纯函数,落 project-lib,单一权威)。
+  所有外层/明细/查询的"总 token"一律经 project_lib.totalToken() 计算,严禁消费方硬编码第二套公式。
+  legacy tokens 字段(= uncachedInput+output,0.8.0 计费口径)仅 read 兼容,不再作展示/查询总消耗口径。
+- **cacheRate** = cacheRead / (cacheRead + uncachedInput),分子分母同源;cacheRead≤0 或分母 0 → 0。
+- 工具输出承载:project_budget get 的 totals 增 totalToken / byModel(按 model 分组)/ cacheRate;
+  project_status 单项目详情的 project.budget 增 totalToken 与按 role 的 byRoleTotal 展开。
+- 看板渲染侧(hot-plugins/project-hub)**本轮不触**(D3),外层总 token 由工具输出承载。
+
+### model 来源说明(cost-v2)
+- 每笔 runtime-events/commit 条目带 model(+provider):来源 = 上报会话(本角色会话)的 agent 路由——
+  session.requestHeader()?.config.{provider,model} 优先,回退 agent.options.{provider,model};可选经
+  ctx.get('llm')?.resolveModelInfo(provider, model) 解析规范名增强(try/catch 降级原始路由串)。
+- **取不到一律显式 model:'unknown'**,严禁伪造/静默缺省/用协调者路由冒充角色桶(命中 unsupported-degradation)。
+- B 路 collect 重写时从被移除的 A 路 runtime-events 条目按 session carry-forward 溯源并入角色桶;
+  无溯源的桶 → 'unknown'。若需 B 路满 model provenance,需另立项建 sessionId→model 溯源缓存(默认不做)。
+
 ### 路径纪律
 - 一切项目文件都在 <workspace>/<projectId>/ 内;projectId 由标题清洗为 kebab slug,含路径分隔符或 ".." 的 id 一律拒绝。
 - 角色 workspace=project-root:只在 <workspace>/<projectId>/ 内读写;journal 用 write 追加;登记簿 JSON 只经上述工具修改,不手改。
@@ -1720,7 +1842,7 @@ export function apply(ctx, config = {}) {
   const cfg = normalizeConfig(config);
   // preset 自带库 = 插件文件 ../..(即 preset 根)下的 roles|flows(SPEC §4 库解析)。
   const presetDir = fileURLToPath(new URL('..', import.meta.url));
-  const api = makeApi({ cfg, presetDir, logger: ctx.logger });
+  const api = makeApi({ cfg, presetDir, logger: ctx.logger, ctx });
   ctx.systemPrompt.section({
     name: 'project-pipeline/manual',
     order: 140,
@@ -1851,7 +1973,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register({
     name: 'project_budget',
-    description: '项目预算账本(BUDGET.json):get 查账(含 totals 聚合);set-estimate / set-cap 设置估算与上限(形状自由,工具不解释);commit 逐阶段上报消耗(entry.stageId/role/usage,source 默认 self-report)。source=runtime-events 且 usage 缺省时插件按调用者会话 id 读 projcache 自动填真实 token 四桶。每阶段结算后都应上报一次。',
+    description: '项目预算账本(BUDGET.json):get 查账(totals 含统一总 token totalToken/按 model 分组 byModel/缓存率 cacheRate/按 role 展开 byRoleTotal);set-estimate / set-cap 设置估算与上限(形状自由,工具不解释);commit 逐阶段上报消耗(entry.stageId/role/usage,source 默认 self-report)。source=runtime-events 且 usage 缺省时插件按调用者会话 id 读 projcache 自动填真实 token(四桶+model/provider,model 取本会话 agent 路由)。每阶段结算后都应上报一次。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -1879,6 +2001,8 @@ export function apply(ctx, config = {}) {
       render: (args, value) => [{ type: 'text', text: [
         `项目 ${args.projectId} 预算(${args.action})`,
         `账面:estimate=${JSON.stringify(value.estimate)};cap=${JSON.stringify(value.cap)};committed ${value.totals.entries} 条;按角色 ${JSON.stringify(value.totals.byRole)};按来源 ${JSON.stringify(value.totals.bySource)}`,
+        `统一总 token=${value.totals.totalToken};缓存率=${Number.isFinite(value.totals.cacheRate) ? value.totals.cacheRate.toFixed(4) : value.totals.cacheRate}`,
+        `按 model:${JSON.stringify(value.totals.byModel)}`,
       ].join('\n') }],
     },
     async execute(args, context) {
@@ -1888,7 +2012,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register({
     name: 'project_status',
-    description: '项目查询:不带 projectId 列出工作区全部项目(id/标题/状态/迭代/阶段);带 projectId 返回单项目详情(当前阶段、门禁态、预算 totals、SUMMARY 是否存在)。',
+    description: '项目查询:不带 projectId 列出工作区全部项目(id/标题/状态/迭代/阶段);带 projectId 返回单项目详情(当前阶段、门禁态、预算 totals(含统一总 token)、SUMMARY 是否存在)。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -1909,7 +2033,7 @@ export function apply(ctx, config = {}) {
         const p = value.project;
         return [{ type: 'text', text: [
           `项目 ${p.projectId}「${p.title}」:${p.state},第 ${p.iteration} 次迭代,当前阶段 #${p.stageIndex + 1} ${p.currentStage ? `${p.currentStage.id}(${stageTypeLabel(p.currentStage.type)})` : '(指针越界)'},gateStatus=${JSON.stringify(p.gateStatus)},流程 ${p.flowRef}${p.openBlockers > 0 ? `,⚠ 未解决卡点 ${p.openBlockers} 个(project_block list 查看)` : ''}`,
-          `预算:committed ${p.budget.totals.entries} 条;SUMMARY ${p.summaryExists ? '已存在' : '尚无'};更新于 ${p.updatedAt}`,
+          `预算:committed ${p.budget.totals.entries} 条;统一总 token=${p.budget.totals.totalToken}(按 role:${JSON.stringify(p.budget.totals.byRoleTotal)});SUMMARY ${p.summaryExists ? '已存在' : '尚无'};更新于 ${p.updatedAt}`,
         ].join('\n') }];
       },
     },

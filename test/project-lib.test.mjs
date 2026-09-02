@@ -17,18 +17,23 @@ import {
   BLOCKER_CATEGORIES,
   MAX_COMPILED_PERSONA,
   aggregateByCategory,
+  aggregateByModel,
   aggregateByRole,
   baseDossierExists,
   baseDossierPaths,
+  cacheRate,
   buildFailureReport,
   collectAllBlockers,
   compileReadingsHeader,
   entitySlugOf,
   expandReadings,
   matchRuling,
+  modelLabel,
+  normalizeUsage,
   readProjcache,
   readRulings,
   sessionTokenUsage,
+  totalToken,
   validateReadings,
   validateRulings,
   writeJson,
@@ -332,9 +337,9 @@ test('sessionTokenUsage:会话在表内返回四桶;不在表内/结构缺失 �
   assert.equal(sessionTokenUsage({ tables: {} }, 's1'), null);
 });
 
-test('aggregateByRole:按角色桶聚合,会话不在 projcache 表内跳过', () => {
+test('aggregateByRole:按角色桶聚合,会话不在 projcache 表内跳过;桶含 cacheRead/cacheWrite/model 溯源位', () => {
   const projcache = makeProjcache({
-    s1: { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    s1: { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 50, cacheWriteTokens: 10 },
     s2: { uncachedInputTokens: 200, outputTokens: 30, cacheReadTokens: 0, cacheWriteTokens: 0 },
     s3: { uncachedInputTokens: 50, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
   });
@@ -346,10 +351,29 @@ test('aggregateByRole:按角色桶聚合,会话不在 projcache 表内跳过', (
   };
   const buckets = aggregateByRole(sessions, projcache);
   assert.deepEqual(buckets, {
-    coordinator: { tokens: 120, uncachedInputTokens: 100, outputTokens: 20, sessionCount: 1 },
-    dev: { tokens: 285, uncachedInputTokens: 250, outputTokens: 35, sessionCount: 2 },
+    coordinator: { tokens: 120, uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 50, cacheWriteTokens: 10, sessionCount: 1, model: 'unknown', provider: null },
+    dev: { tokens: 285, uncachedInputTokens: 250, outputTokens: 35, cacheReadTokens: 0, cacheWriteTokens: 0, sessionCount: 2, model: 'unknown', provider: null },
   });
   assert.equal(buckets.dev.sessionCount, 2, 'ghost 会话被跳过,不计数');
+});
+
+test('aggregateByRole:model 溯源 carry-forward——同 role 多 session 不同 model 连接为多标签,无溯源 → unknown', () => {
+  const projcache = makeProjcache({
+    s1: { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    s2: { uncachedInputTokens: 200, outputTokens: 30, cacheReadTokens: 0, cacheWriteTokens: 0 },
+    s3: { uncachedInputTokens: 50, outputTokens: 5, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  });
+  const sessions = { s1: { role: 'dev' }, s2: { role: 'dev' }, s3: { role: 'tester' } };
+  // s1/s2 均为 dev 但 model 不同 → dev 桶多标签 'A/B';s3 tester 无溯源 → 'unknown'。
+  const buckets = aggregateByRole(sessions, projcache, { bySession: {
+    s1: { model: 'deepseek-r1', provider: 'ollama-cloud' },
+    s2: { model: 'gpt-4o', provider: 'openai' },
+  } });
+  assert.equal(buckets.dev.model, 'deepseek-r1/gpt-4o', '多模型以 / 连接');
+  assert.equal(buckets.dev.provider, 'ollama-cloud/openai');
+  assert.equal(buckets.dev.cacheReadTokens, 0);
+  assert.equal(buckets.tester.model, 'unknown', '无溯源 → unknown');
+  assert.equal(buckets.tester.provider, null);
 });
 
 test('aggregateByRole:空/非法输入 → 空对象', () => {
@@ -417,4 +441,68 @@ test('compileReadingsHeader:展开 readings 拼"进场必读"头;无 readings �
   assert.equal(header, '进场必读:\n- .dsh-base/ent/STATE.md\n- proj-a/SPEC.md');
   assert.equal(compileReadingsHeader([], {}), '');
   assert.equal(compileReadingsHeader(undefined, {}), '');
+});
+
+// ── cost-v2 统一 token 口径与模型来源(0.12.0)────────────────────────────
+
+test('totalToken:happy path = uncachedInput+cacheRead+output(权威单口径,不含 cacheWrite)', () => {
+  assert.equal(totalToken({ uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 50, cacheWriteTokens: 200 }), 170);
+  assert.equal(totalToken({ uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0 }), 120, 'cacheRead=0 不影响');
+  // 缺桶(旧形状)→ 0 兼容;非数字 → 0 兜底;非对象 → 0。
+  assert.equal(totalToken({}), 0);
+  assert.equal(totalToken({ uncachedInputTokens: 'x', outputTokens: {}, cacheReadTokens: null }), 0);
+  assert.equal(totalToken(null), 0);
+  assert.equal(totalToken(undefined), 0);
+});
+
+test('cacheRate:有 cacheRead → 分母同源;cacheRead<=0/分母0/非对象 → 0(不炸)', () => {
+  assert.equal(cacheRate({ cacheReadTokens: 50, uncachedInputTokens: 100 }), 50 / 150, '50/150');
+  assert.equal(cacheRate({ cacheReadTokens: 0, uncachedInputTokens: 100 }), 0, 'cacheRead=0');
+  assert.equal(cacheRate({ cacheReadTokens: -5, uncachedInputTokens: 100 }), 0, 'cacheRead<0');
+  assert.equal(cacheRate({ cacheReadTokens: 50, uncachedInputTokens: 0 }), 50 / 50, '分母只有 cacheRead(>0)不炸');
+  assert.equal(cacheRate(null), 0);
+  assert.equal(cacheRate({}), 0);
+});
+
+test('normalizeUsage:旧形状无 cacheRead/cacheWrite/model→四桶0+unknown;新形状原样;缺字段兼容', () => {
+  const oldShape = normalizeUsage({ tokens: 120, uncachedInputTokens: 100, outputTokens: 20 });
+  assert.deepEqual(oldShape, {
+    tokens: 120, uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 0, cacheWriteTokens: 0, sessionCount: 0, model: 'unknown', provider: null,
+  });
+  const newShape = normalizeUsage({ tokens: 120, uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 50, cacheWriteTokens: 10, sessionId: 's1', model: 'deepseek-r1', provider: 'ollama-cloud' });
+  assert.equal(newShape.model, 'deepseek-r1');
+  assert.equal(newShape.provider, 'ollama-cloud');
+  assert.equal(newShape.cacheReadTokens, 50);
+  assert.equal(newShape.sessionId, 's1');
+  // 缺 model/provider → 'unknown'/null;sessionCount 缺省 0;tokens 缺省按 uncached+output。
+  const noModel = normalizeUsage({ uncachedInputTokens: 7, outputTokens: 3 });
+  assert.equal(noModel.model, 'unknown');
+  assert.equal(noModel.provider, null);
+  assert.equal(noModel.tokens, 10, 'tokens 缺省 = uncached+output');
+  // 非对象 → 全 0 + unknown
+  const none = normalizeUsage(null);
+  assert.equal(none.model, 'unknown');
+  assert.equal(none.uncachedInputTokens, 0);
+});
+
+test('modelLabel:undefined/null/空/非字符串 → unknown;有值 → 原样', () => {
+  assert.equal(modelLabel(undefined), 'unknown');
+  assert.equal(modelLabel(null), 'unknown');
+  assert.equal(modelLabel(''), 'unknown');
+  assert.equal(modelLabel('deepseek-v4-flash'), 'deepseek-v4-flash');
+});
+
+test('aggregateByModel:按 model 分组聚合;未知/缺省桶归 unknown', () => {
+  const committed = [
+    { role: 'dev', usage: { uncachedInputTokens: 100, outputTokens: 20, cacheReadTokens: 30, model: 'a' } },
+    { role: 'dev', usage: { uncachedInputTokens: 200, outputTokens: 40, cacheReadTokens: 0, model: 'a' } },
+    { role: 'tester', usage: { uncachedInputTokens: 10, outputTokens: 5, model: 'b' } },
+    { role: 'dev', usage: { uncachedInputTokens: 1, outputTokens: 1 } }, // 无 model → unknown
+  ];
+  const byModel = aggregateByModel(committed);
+  assert.equal(byModel.a.totalToken, 390, 'a 桶 = (100+30+20)+(200+0+40)');
+  assert.equal(byModel.a.entries, 2);
+  assert.equal(byModel.b.totalToken, 15);
+  assert.equal(byModel.unknown.totalToken, 2, '缺 model 归 unknown');
+  assert.equal(byModel.unknown.entries, 1);
 });
