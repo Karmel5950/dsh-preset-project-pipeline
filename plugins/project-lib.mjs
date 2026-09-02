@@ -24,6 +24,15 @@
 //   - entitySlugOf / baseDossierPaths / baseDossierExists(实体仓底座四件套路径);
 //   - validateReadings / expandReadings / compileReadingsHeader(role manifest readings 段);
 //   - validateRole 增 readings 只增校验。
+// 0.11.0 新增(P4 记忆治理·消费路由优先,2026-09-02):
+//   - validateRulings 扩展:negative-premises(否定面,string[])/ basis(机制版本锚,string),
+//     只增不改(既有 r1~r4 字段不动);matchRuling 命中判据扩展为「premise 命中 + negative-premises 不命中」。
+//   - BLOCKER_CATEGORIES 开放为核心集(6 类恒在);resolveBlockerCategories(workspaceDir)
+//     = 核心集 ∪ <workspaceDir>/.dsh-library/categories.json 扩展(同名去重扩展条目胜;
+//     缺失/坏 JSON → 回退核心集并告警,不炸调用方)。validateCategories 校验扩展形状。
+//   - lessons-index 消费路由索引:buildLessonsIndex / bumpLessonHits / validateLessonsIndex(均纯函数)。
+//     结构 schemaVersion=1,{ categories: { <category>: [{ id, kind, title, premises, status, origin, hits }] } }。
+//     hits 初始 0;rebuild 保留既有 hits、新增篇目 hits=0;kind=lesson/pattern 统一归类不按 kind 分叉。
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
@@ -482,14 +491,15 @@ export function compileReadingsHeader(readings, { base, project } = {}) {
 
 // ── 机制1 既定裁决库(2026-08-30 流程补丁)──────────────────────────────────
 
-/** 裁决条目允许的键(未知键 → 校验失败)。 */
-const RULING_ALLOWED_KEYS = new Set(['id', 'category', 'premise', 'conclusion', 'means']);
+/** 裁决条目允许的键(未知键 → 校验失败)。negative-premises/basis 为 0.11.0 只增扩展。 */
+const RULING_ALLOWED_KEYS = new Set(['id', 'category', 'premise', 'conclusion', 'means', 'negative-premises', 'basis']);
 
 /**
  * 校验裁决库结构(机制1)。value 为解析后的对象。
  * 要求:schemaVersion=1;rulings 为非空数组;每条含 id/category/premise/conclusion/means;
- * category ∈ BLOCKER_CATEGORIES;未知键 → 失败。返回 { ok, value } 或 { ok:false, error }。
- * 供单测(AC-m1-t1)与 product 引用前自查。
+ * category ∈ BLOCKER_CATEGORIES;negative-premises(可选)= 非空字符串数组(否定面,何种情形不命中);
+ * basis(可选)= 非空字符串(机制版本锚,harvest 复查提示);未知键 → 失败。返回 { ok, value } 或 { ok:false, error }。
+ * 供单测(AC-m1-t1)与 product 引用前自查。既有 r1~r4 字段不动,新字段只增。
  */
 export function validateRulings(value) {
   if (!isPlainObject(value)) return bad('裁决库必须是 JSON 对象');
@@ -515,6 +525,17 @@ export function validateRulings(value) {
     }
     for (const key of ['premise', 'conclusion', 'means']) {
       if (!nonEmptyString(r[key])) return bad(`${at}.${key} 必填(非空字符串)`);
+    }
+    if (r['negative-premises'] !== undefined) {
+      if (!Array.isArray(r['negative-premises']) || r['negative-premises'].length === 0) {
+        return bad(`${at}.negative-premises 必须是非空字符串数组`);
+      }
+      if (r['negative-premises'].some((x) => !nonEmptyString(x))) {
+        return bad(`${at}.negative-premises 每项必须是非空字符串`);
+      }
+    }
+    if (r.basis !== undefined && !nonEmptyString(r.basis)) {
+      return bad(`${at}.basis 必须是非空字符串`);
     }
   }
   return good(value);
@@ -544,25 +565,249 @@ export async function readRulings(workspaceDir) {
 }
 
 /**
- * 命中判据(机制1 m1-r3):返回首个 category 相同 且 premise 与当前情形一致
- * (前提一致才命中)的裁决;否则 undefined。
+ * 命中判据(机制1 m1-r3;0.11.0 扩展 negative-premises):返回首个 category 相同、
+ * premise 前提一致 且 negative-premises 全部不命中的裁决;否则 undefined。
  * 前提一致判定为宽松包含:把裁决前提按标点/空白切分为关键词(长度 ≥2),当前情形
- * 文本包含全部关键词即视为一致。前提不成立则命中失效、仍上报(保守,宁多报不误吞)。
+ * 文本包含全部关键词即视为一致。negative-premises(否定面)同理:把每条否定前提按
+ * 标点/空白切词,当前情形包含其全部关键词即视为「该否定前提成立」;任一否定前提成立
+ * → 该裁决不命中(保守,宁多报不误吞)。返回的裁决对象经 `matchOf` 剥除辅助字段。
  */
+function premiseKeywords(premise) {
+  if (typeof premise !== 'string' || premise.length === 0) return [];
+  return premise.split(/[/()，。；、\s]+/).filter((w) => w.length >= 2);
+}
+
+function premiseContains(premise, premiseText) {
+  if (typeof premiseText !== 'string' || premiseText.length === 0) return false;
+  const keywords = premiseKeywords(premiseText);
+  if (keywords.length === 0) return premise.includes(premiseText);
+  return keywords.every((k) => premise.includes(k));
+}
+
 export function matchRuling(rulings, { category, premise }) {
   if (!Array.isArray(rulings)) return undefined;
   if (typeof category !== 'string' || typeof premise !== 'string') return undefined;
   for (const ruling of rulings) {
     if (ruling?.category !== category) continue;
     if (typeof ruling?.premise !== 'string' || ruling.premise.length === 0) continue;
-    const keywords = ruling.premise.split(/[/()，。；、\s]+/).filter((w) => w.length >= 2);
-    if (keywords.length === 0) {
-      if (premise.includes(ruling.premise)) return ruling;
-      continue;
-    }
-    if (keywords.every((k) => premise.includes(k))) return ruling;
+    // 前提一致才命中(否定面:任一否定前提成立即不命中)。
+    if (!premiseContains(premise, ruling.premise)) continue;
+    const negatives = Array.isArray(ruling['negative-premises']) ? ruling['negative-premises'] : [];
+    if (negatives.some((np) => premiseContains(premise, np))) continue;
+    return ruling;
   }
   return undefined;
+}
+
+// ── P4 记忆治理·消费路由优先(0.11.0,2026-09-02)─────────────────────────
+// 四件事:①BLOCKER_CATEGORIES 开放(核心集 + .dsh-library/categories.json 扩展);
+// ②lessons-index.json 消费路由索引(buildLessonsIndex / bumpLessonHits);
+// ③validateCategories / validateLessonsIndex 校验扩展与索引形状。
+// 数据文件均为 workspace 级(.dsh-library/),与 rulings.json 同层;纯函数、零 npm import。
+
+/** workspace 级库目录名(LIBRARY_DIRNAME 已在上方声明 `.dsh-library`)。 */
+
+/** 卡点分类扩展文件路径(<workspaceDir>/.dsh-library/categories.json)。 */
+export function categoriesFilePath(workspaceDir) {
+  return join(workspaceDir, LIBRARY_DIRNAME, 'categories.json');
+}
+
+/**
+ * 校验卡点分类扩展(categories.json)。扩展允许两种形状:
+ *   A. 顶层即数组(纯字符串数组,与核心集并列);
+ *   B. 对象 { schemaVersion: 1, categories: [...] }(带版本锚,推荐)。
+ * 要求:每项非空字符串;重复项告警(去重后合并)。返回 { ok, value: string[] } 或 { ok:false, error }。
+ */
+export function validateCategories(value) {
+  let list;
+  if (typeof value === 'string' && value.trim().length === 0) return bad('categories.json 不能是空字符串');
+  if (Array.isArray(value)) {
+    list = value;
+  } else if (isPlainObject(value)) {
+    if (value.schemaVersion !== undefined && value.schemaVersion !== 1) {
+      return bad(`categories.json schemaVersion 仅支持 1,得到 ${JSON.stringify(value.schemaVersion)}`);
+    }
+    if (!Array.isArray(value.categories)) return bad('categories.json 对象形状须含 categories 数组');
+    list = value.categories;
+  } else {
+    return bad('categories.json 须是字符串数组或 { schemaVersion, categories } 对象');
+  }
+  if (list.length === 0) return good([]);
+  for (let i = 0; i < list.length; i++) {
+    if (!nonEmptyString(list[i])) return bad(`categories.json 第 ${i} 项必须是非空字符串`);
+  }
+  const seen = new Set();
+  const deduped = [];
+  for (const item of list) {
+    if (seen.has(item)) continue;
+    seen.add(item);
+    deduped.push(item);
+  }
+  return good(deduped);
+}
+
+/**
+ * 解析卡点分类合并集 = 核心集(BLOCKER_CATEGORIES,6 类恒在) ∪ categories.json 扩展。
+ * categories.json 缺失/坏 JSON/结构非法 → 回退核心集并给出 error(不炸调用方,与 readRulings 同款容错)。
+ * 同名去重时扩展条目胜(核心 6 类恒在,不可被扩展移除)。返回 { categories, error? }。
+ */
+export async function resolveBlockerCategories(workspaceDir) {
+  const core = [...BLOCKER_CATEGORIES];
+  const file = categoriesFilePath(workspaceDir);
+  let text;
+  try {
+    text = await readFile(file, 'utf8');
+  } catch (error) {
+    return { categories: core, error: `categories.json 读取失败(回退核心集):${error?.code ?? error?.message ?? error}` };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { categories: core, error: `categories.json 不是合法 JSON(回退核心集):${file}` };
+  }
+  const checked = validateCategories(parsed);
+  if (!checked.ok) {
+    return { categories: core, error: `categories.json 结构非法(回退核心集):${checked.error}` };
+  }
+  const merged = [...core];
+  for (const ext of checked.value) {
+    if (!merged.includes(ext)) merged.push(ext);
+  }
+  return { categories: merged };
+}
+
+/** 一篇 lesson 的元数据登记形状(lessons/ 与 patterns/ 通用)。 */
+function validLessonKind(kind) {
+  return kind === 'lesson' || kind === 'pattern';
+}
+
+/**
+ * 校验一篇 lesson 元数据登记项。要求:id(kebab)/kind(lesson|pattern)/title/premises/
+ * status 均非空字符串;origin 可选。返回 { ok, value } 或 { ok:false, error }。
+ */
+export function validateLessonEntry(entry) {
+  if (!isPlainObject(entry)) return bad('lesson 条目必须是对象');
+  for (const key of Object.keys(entry)) {
+    if (!['id', 'kind', 'category', 'title', 'premises', 'status', 'origin', 'sourceFile', 'hits'].includes(key)) {
+      return bad(`lesson 条目含未知键 "${key}"`);
+    }
+  }
+  if (!nonEmptyString(entry.id) || !/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(entry.id)) {
+    return bad(`lesson 条目 id 必须是 slug(字母/数字开头,只含字母/数字/连字符),得到 ${JSON.stringify(entry.id ?? null)}`);
+  }
+  if (!validLessonKind(entry.kind)) return bad(`lesson 条目 kind 必须是 lesson/pattern,得到 ${JSON.stringify(entry.kind ?? null)}`);
+  if (entry.category !== undefined && !nonEmptyString(entry.category)) return bad('lesson 条目 category 若非空必为非空字符串');
+  for (const key of ['title', 'premises', 'status']) {
+    if (!nonEmptyString(entry[key])) return bad(`lesson 条目 ${key} 必填(非空字符串)`);
+  }
+  if (entry.origin !== undefined && !nonEmptyString(entry.origin)) return bad('lesson 条目 origin 若非空必为非空字符串');
+  if (entry.sourceFile !== undefined && !nonEmptyString(entry.sourceFile)) return bad('lesson 条目 sourceFile 若非空必为非空字符串');
+  return good(entry);
+}
+
+/**
+ * 构建 lessons-index(纯函数)。输入为 lesson 元数据登记项数组(经 validateLessonEntry 校验者,
+ * 未校验由调用方保证形状),输出:
+ *   { schemaVersion: 1, categories: { <category>: [{ id, kind, title, premises, status, origin? , hits }] } }
+ * 归 class 按 entry.category:每篇按 category 归类(缺省 'uncategorized');kind 不造成分叉
+ * (lesson/pattern 统一归入 category 桶,与 DESIGN 疑问 1 定稿一致)。保留既有 hits:
+ * existingIndex 里已有 id 的条目沿用其 hits;新增条目 hits=0。category 冲突时
+ * (design 疑问 3 只适用于 categories.json,这里 category 即索引键)后写覆盖先写的去重。
+ */
+export function buildLessonsIndex(entries, existingIndex = null) {
+  const categories = {};
+  const existingHits = new Map();
+  if (existingIndex !== null && typeof existingIndex === 'object') {
+    const existingCats = existingIndex.categories;
+    if (existingCats !== null && typeof existingCats === 'object') {
+      for (const [_cat, list] of Object.entries(existingCats)) {
+        if (!Array.isArray(list)) continue;
+        for (const item of list) {
+          if (item !== null && typeof item === 'object' && typeof item.id === 'string' && typeof item.hits === 'number') {
+            existingHits.set(item.id, item.hits);
+          }
+        }
+      }
+    }
+  }
+  for (const entry of entries) {
+    const item = {
+      id: entry.id,
+      kind: entry.kind,
+      title: entry.title,
+      premises: entry.premises,
+      status: entry.status,
+      ...(entry.origin !== undefined ? { origin: entry.origin } : {}),
+      ...(entry.sourceFile !== undefined ? { sourceFile: entry.sourceFile } : {}),
+      hits: existingHits.has(entry.id) ? existingHits.get(entry.id) : 0,
+    };
+    const category = typeof entry.category === 'string' && entry.category.trim().length > 0 ? entry.category : 'uncategorized';
+    if (!Array.isArray(categories[category])) categories[category] = [];
+    categories[category].push(item);
+  }
+  return { schemaVersion: 1, categories };
+}
+
+/**
+ * 递增 lessons-index 命中篇目 hits(纯函数)。lessonRefs 为 id 数组,在索引中逐桶查找,
+ * 命中则 hits+1;未命中篇目记入 misses。返回 { index, bumped, misses }:
+ *   index:新增 hits 后的索引(对象引用不原地改,返回新扁平 categories);
+ *   bumped: [{ id, hits }] 递增明细;
+ *   misses: 未找到的 id 数组。
+ */
+export function bumpLessonHits(index, lessonRefs) {
+  const refs = new Set(Array.isArray(lessonRefs) ? lessonRefs.filter((x) => typeof x === 'string' && x.length > 0) : []);
+  const categories = {};
+  const bumped = [];
+  const misses = [];
+  const cats = (index !== null && typeof index === 'object' && index.categories !== null && typeof index.categories === 'object') ? index.categories : {};
+  for (const [category, list] of Object.entries(cats)) {
+    if (!Array.isArray(list)) continue;
+    categories[category] = list.map((item) => {
+      if (!refs.has(item?.id)) return item;
+      return { ...item, hits: (item?.hits ?? 0) + 1 };
+    });
+  }
+  // 收集 bumped。
+  for (const ref of refs) {
+    let found = false;
+    for (const list of Object.values(categories)) {
+      const hit = list.find((item) => item?.id === ref);
+      if (hit) { bumped.push({ id: ref, hits: hit.hits }); found = true; break; }
+    }
+    if (!found) misses.push(ref);
+  }
+  return { index: { schemaVersion: 1, categories }, bumped, misses };
+}
+
+/**
+ * 校验 lessons-index 结构。要求:schemaVersion=1;categories 为对象;键为 category;
+ * 每桶为非空对象数组,每项经 validateLessonEntry + hits 为非负整数。
+ * 返回 { ok, value } 或 { ok:false, error }。
+ */
+export function validateLessonsIndex(value) {
+  if (!isPlainObject(value)) return bad('lessons-index 必须是 JSON 对象');
+  const allowed = new Set(['schemaVersion', 'categories']);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) return bad(`lessons-index 含未知键 "${key}"`);
+  }
+  if (value.schemaVersion !== 1) return bad(`lessons-index schemaVersion 仅支持 1,得到 ${JSON.stringify(value.schemaVersion)}`);
+  if (!isPlainObject(value.categories)) return bad('lessons-index 缺 categories 对象');
+  for (const [category, list] of Object.entries(value.categories)) {
+    if (typeof category !== 'string' || category.length === 0) return bad('lessons-index category 键必须是非空字符串');
+    if (!Array.isArray(list)) return bad(`category "${category}" 的篇目必须是非空数组`);
+    if (list.length === 0) return bad(`category "${category}" 的篇目不能为空`);
+    for (let i = 0; i < list.length; i++) {
+      const checked = validateLessonEntry(list[i]);
+      if (!checked.ok) return bad(`category "${category}" 第 ${i} 项:${checked.error}`);
+      const hits = list[i].hits;
+      if (typeof hits !== 'number' || !Number.isInteger(hits) || hits < 0) {
+        return bad(`category "${category}" 第 ${i} 项 hits 必须是非负整数,得到 ${JSON.stringify(hits)}`);
+      }
+    }
+  }
+  return good(value);
 }
 
 // ── 机制2 失败模式聚合(2026-08-30 流程补丁)────────────────────────────────

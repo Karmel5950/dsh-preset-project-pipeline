@@ -258,9 +258,14 @@ test('preset 自带库可读:6 角色 + standard-flow(11 阶段)+ iteration-flow
       assert.ok(shown.subagent.toolFilter.allow.includes('project_budget'), `${role.id} allow 含 project_budget`);
       assert.equal(shown.subagent.agentOptions, undefined, '清单未声明 model 时不应有 agentOptions');
       assert.match(shown.workspaceNote, /\.dsh-project\//);
-      // P1:六角色均带 readings;未给 projectId 时返回原始模板(含 {{base}}/{{project}})。
+      // P1:六角色均带 readings;未给 projectId 时返回原始模板(含 {{base}}/{{project}}
+      // 或 P4 的相对 .dsh-library/ 路径 readings,如 lessons-index.json)。
       assert.ok(Array.isArray(shown.readings) && shown.readings.length > 0, `${role.id} readings 非空`);
-      assert.ok(shown.readings.every((r) => r.includes('{{base}}') || r.includes('{{project}}')), `${role.id} readings 为原始模板`);
+      assert.ok(shown.readings.every((r) => r.includes('{{base}}') || r.includes('{{project}}') || r.startsWith('.dsh-library/')), `${role.id} readings 为原始模板`);
+      // P4:coordinator 应有 lessons-index.json 消费路由索引 reading。
+      if (role.id === 'coordinator') {
+        assert.ok(shown.readings.includes('.dsh-library/lessons-index.json'), 'coordinator readings 应含 lessons-index.json(P4 AC3)');
+      }
       // 编译后 persona(进场必读头+正文)不超 MAX_COMPILED_PERSONA(1000)。
       assert.ok(shown.subagent.persona.length <= 1000, `${role.id} 编译后 persona ≤1000`);
       assert.ok(shown.subagent.persona.includes('进场必读:'), `${role.id} 编译后 persona 含进场必读头`);
@@ -525,7 +530,7 @@ const REAL_TOOL_SURFACE = new Set([
   'subagent_architect', 'subagent_deliverer', 'subagent_dev', 'subagent_product', 'subagent_tester', 'subagent_coordinator', 'subagent_devhelper',
   'send_message', 'interrupt_agent', 'subagent_control', 'subagent_list_agents',
   // project-registry
-  'project_register', 'project_advance', 'project_gate', 'project_budget', 'project_status', 'project_block',
+  'project_register', 'project_advance', 'project_gate', 'project_budget', 'project_status', 'project_block', 'project_harvest',
   // project-roles
   'role_list', 'role_show', 'flow_list', 'flow_show',
 ]);

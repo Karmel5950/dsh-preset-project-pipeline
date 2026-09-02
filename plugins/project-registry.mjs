@@ -46,10 +46,17 @@
 //     clarify 阶段 produces 产出底座初稿四件套(流程数据表达,不加新阶段类型);
 //   - status 单项目详情增 entitySlug(经 entitySlugOf);
 //   - MANUAL_TEXT 增「底座 Base Dossier」小节。
+// 0.11.0 新增(P4 记忆治理·消费路由优先,2026-09-02):
+//   - block() 运行时 category 校验改用 resolveBlockerCategories(核心集 + categories.json 扩展),
+//     不再维护独立枚举(单一权威 = project-lib,消除双份漂移);
+//   - project_block 工具 schema 的 category 由 enum 改 type:string + description(运行时兜底,
+//     兼容任意扩展,疑问 4 定稿);
+//   - 新增 project_harvest 工具(action=rebuild-index 扫 lessons/patterns 按元数据归类
+//     建 lessons-index.json 保留 hits + bump-hits 递增);MANUAL_TEXT 工具速查补条目。
 
 import { existsSync, readFileSync } from 'node:fs';
-import { appendFile, mkdir, readdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   BUDGET_SOURCES,
@@ -61,11 +68,16 @@ import {
   readJson,
   readProjcache,
   registryPaths,
+  resolveBlockerCategories,
   resolveLibrary,
   sessionTokenUsage,
   slugify,
   slugifyStrict,
   validateStageList,
+  buildLessonsIndex,
+  bumpLessonHits,
+  validateLessonEntry,
+  validateLessonsIndex,
   writeJson,
 } from './project-lib.mjs';
 
@@ -1109,8 +1121,19 @@ function makeApi({ cfg, presetDir, logger }) {
       }
       if (!nonEmptyString(args.reason)) throw new Error(`${name}/project_block: report 需要 reason(非空字符串):卡点是什么、为什么无法在当前能力/环境下解决`);
       const category = args.category ?? 'other';
-      if (!BLOCKER_CATEGORIES.includes(category)) {
-        throw new Error(`${name}/project_block: category 必须是 ${BLOCKER_CATEGORIES.join('/')},得到 ${JSON.stringify(category)}`);
+      // 0.11.0:运行时 category 校验改用合并集(核心集 + .dsh-library/categories.json 扩展),
+      // 单一权威 = project-lib 的 resolveBlockerCategories,本插件不再维护独立枚举。
+      let merged;
+      try {
+        const resolved = await resolveBlockerCategories(workspaceDir);
+        merged = resolved.categories;
+        if (resolved.error) logger.warn?.(`${name}/project_block: ${resolved.error}`);
+      } catch (error) {
+        merged = BLOCKER_CATEGORIES;
+        logger.warn?.(`${name}/project_block: resolveBlockerCategories 异常,回退核心集:${error?.message ?? error}`);
+      }
+      if (!merged.includes(category)) {
+        throw new Error(`${name}/project_block: category 必须是核心集或 categories.json 扩展之一(${merged.join('/')}),得到 ${JSON.stringify(category)}`);
       }
       const id = `b${registry.blockers.length + 1}`;
       const now = new Date().toISOString();
@@ -1184,7 +1207,134 @@ function makeApi({ cfg, presetDir, logger }) {
     throw new Error(`${name}/project_block: action 必须是 report/resolve/list,得到 ${JSON.stringify(args?.action ?? null)}`);
   }
 
-  return { register, advance, gate, budget, status, block };
+  /** 读 lessons/ 或 patterns/ 目录下的 .md 篇目,解析头部元数据块,返回登记项数组。 */
+  async function collectLessonEntries(workspaceDir, libraryName, kind) {
+    const dir = join(workspaceDir, libraryName, kind === 'pattern' ? 'patterns' : 'lessons');
+    let names;
+    try {
+      names = await readdir(dir);
+    } catch {
+      return []; // 目录缺失 = 该来源为空,不是错误
+    }
+    const entries = [];
+    for (const name of names.sort()) {
+      if (!name.endsWith('.md')) continue;
+      const file = join(dir, name);
+      let text;
+      try {
+        text = await readFile(file, 'utf8');
+      } catch (error) {
+        logger.warn?.(`${name}/project_harvest: 读篇目失败(跳过) ${file}:${error?.code ?? error?.message ?? error}`);
+        continue;
+      }
+      const meta = parseLessonMeta(text, name, kind, file, workspaceDir);
+      const checked = validateLessonEntry(meta);
+      if (!checked.ok) {
+        logger.warn?.(`${name}/project_harvest: 篇目元数据非法(跳过) ${file}:${checked.error}`);
+        continue;
+      }
+      entries.push(checked.value);
+    }
+    return entries;
+  }
+
+  /** 解析 .md 头部 front-matter(--- 分隔的 key: value 行块)为 lesson 元数据登记项。 */
+  function parseLessonMeta(text, fileName, kind, file, workspaceDir) {
+    const id = fileName.replace(/\.md$/i, '');
+    const meta = { id, kind, title: id, premises: '', status: 'active', ...(kind === 'pattern' ? { origin: 'patterns' } : { origin: 'lessons' }) };
+    if (typeof text === 'string' && text.slice(0, 4) === '---\n') {
+      const end = text.indexOf('\n---', 4);
+      if (end > 4) {
+        const block = text.slice(4, end);
+        for (const line of block.split('\n')) {
+          const m = /^([a-zA-Z0-9_-]+)\s*:\s*(.*)$/.exec(line.trim());
+          if (!m || m[2].length === 0) continue;
+          const key = m[1];
+          const value = m[2].trim();
+          if (key === 'title' && value.length > 0) meta.title = value;
+          else if (key === 'premises' && value.length > 0) meta.premises = value;
+          else if (key === 'origin' && value.length > 0) meta.origin = value;
+          else if (key === 'status' && value.length > 0) meta.status = value;
+          else if (key === 'category' && value.length > 0) meta.category = value;
+        }
+        // 无显式 title/premises 时的兜底:取首行 # 标题与第一条非空正文。
+        if (meta.title === id || meta.premises === '') {
+          const heading = /^#\s+(.+)$/m.exec(text);
+          if (meta.title === id && heading) meta.title = heading[1].trim();
+          const bodyLines = text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith('#') && !l.startsWith('---'));
+          if (meta.premises === '' && bodyLines.length > 0) meta.premises = bodyLines[0];
+        }
+      }
+    }
+    // sourceFile 供回溯(相对工作区,路径不因部署机器异而变)。
+    const rel = String(file).split(String(workspaceDir)).pop()?.replace(/^[\\/]+/, '');
+    meta.sourceFile = rel && rel.length > 0 ? rel : file;
+    return meta;
+  }
+
+  // 7. project_harvest ─────────────────────────────────────────────────────
+  // P4 记忆治理·消费路由优先:lessons-index.json(AC1)由 harvest 阶段维护。
+  // action=rebuild-index:扫 lessons/ + patterns/ 读元数据归类,重建索引(保留既有 hits);
+  // action=bump-hits:lessonRefs 递增命中篇目 hits。
+  async function harvest(args, context) {
+    const workspaceDir = sessionWorkspace(context);
+    const action = args?.action;
+    const libraryName = cfg.libraryDir;
+    const indexFile = join(workspaceDir, libraryName, 'lessons-index.json');
+
+    if (action === 'rebuild-index') {
+      for (const key of Object.keys(args)) {
+        if (!['action'].includes(key)) throw new Error(`${name}/project_harvest: rebuild-index 含未知键 "${key}"`);
+      }
+      const [lessons, patterns] = await Promise.all([
+        collectLessonEntries(workspaceDir, libraryName, 'lesson'),
+        collectLessonEntries(workspaceDir, libraryName, 'pattern'),
+      ]);
+      const all = [...lessons, ...patterns];
+      // 读既有索引作 hits 保留基线(缺失/坏索引 → 空基线,不炸)。由 buildLessonsIndex 汇总 hits。
+      let existing = null;
+      try {
+        existing = await readJson(indexFile);
+      } catch {
+        existing = null;
+      }
+      const index = buildLessonsIndex(all, existing);
+      await mkdir(dirname(indexFile), { recursive: true });
+      await writeJson(indexFile, index);
+      const stats = Object.entries(index.categories)
+        .map(([category, list]) => ({ category, count: list.length }))
+        .sort((a, b) => b.count - a.count);
+      return {
+        action: 'rebuild-index',
+        entriesTotal: all.length,
+        categories: stats,
+        categoriesCount: stats.length,
+        indexFile,
+      };
+    }
+
+    if (action === 'bump-hits') {
+      if (!Array.isArray(args?.lessonRefs) || args.lessonRefs.length === 0) {
+        throw new Error(`${name}/project_harvest: bump-hits 需要 lessonRefs(非空字符串数组)`);
+      }
+      if (args.lessonRefs.some((x) => typeof x !== 'string' || x.length === 0)) {
+        throw new Error(`${name}/project_harvest: lessonRefs 每项必须是非空字符串`);
+      }
+      let index;
+      try {
+        index = await readJson(indexFile);
+      } catch {
+        throw new Error(`${name}/project_harvest: 尚未建立 lessons-index.json,先 rebuild-index:${indexFile}`);
+      }
+      const result = bumpLessonHits(index, args.lessonRefs);
+      await writeJson(indexFile, result.index);
+      return { action: 'bump-hits', bumped: result.bumped, misses: result.misses, indexFile };
+    }
+
+    throw new Error(`${name}/project_harvest: action 必须是 rebuild-index/bump-hits,得到 ${JSON.stringify(args?.action ?? null)}`);
+  }
+
+  return { register, advance, gate, budget, status, block, harvest };
 }
 
 // ── 工具 schema(纯 JSON Schema;输出值会被运行时按 schema 严格校验)─────────
@@ -1399,7 +1549,7 @@ function blockerSchema() {
     additionalProperties: false,
     properties: {
       id: { type: 'string' },
-      category: { type: 'string', enum: [...BLOCKER_CATEGORIES] },
+      category: { type: 'string', description: '核心集(design-info/dev-complexity/test-env/deploy-permission/acceptance-capability/other)+ .dsh-library/categories.json 扩展(运行时按合并集校验)。' },
       reason: { type: 'string' },
       raisedAt: { type: 'string' },
       stageIndex: { type: 'integer' },
@@ -1424,6 +1574,24 @@ const BLOCK_OUTPUT_SCHEMA = {
   },
 };
 
+const HARVEST_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    action: { type: 'string', enum: ['rebuild-index', 'bump-hits'] },
+    entriesTotal: { type: 'integer' },
+    categories: {
+      type: 'array',
+      items: { type: 'object', additionalProperties: false, properties: { category: { type: 'string' }, count: { type: 'integer' } }, required: ['category', 'count'] },
+    },
+    categoriesCount: { type: 'integer' },
+    indexFile: { type: 'string' },
+    bumped: { type: 'array', items: { type: 'object', additionalProperties: false, properties: { id: { type: 'string' }, hits: { type: 'integer' } }, required: ['id', 'hits'] } },
+    misses: { type: 'array', items: { type: 'string' } },
+  },
+  required: ['action', 'indexFile'],
+};
+
 // ── 共享手册提示段(SPEC §9;中文,提纲写全)────────────────────────────────
 
 const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
@@ -1444,15 +1612,18 @@ const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
 - project_register 可传 entity(entity-slug,缺省=项目自身):entity 已有底座 → 回执 baseDossier.exists=true;没有 → draftNeeded=true,首轮 clarify 阶段 produces 扩展底座初稿四件套(流程数据表达,不加新阶段类型)。
 - role manifest 的 readings 段(路径模板数组,支持 {base}/{project} 变量):compileSubagent 展开为"进场必读"头拼进 spawn persona;readings 是路径非内容,不挤 persona 长度纪律;编译后 persona(头+正文)超 MAX_COMPILED_PERSONA(1000)在 role_show 编译期报错。
 
-### 工具速查(登记簿 6 + 库 4)
+### 工具速查(登记簿 7 + 库 4)
 1. project_register:登记新项目。title+requirement 必填;flowTemplate 选模板(默认 standard-flow)或给 flowStages 现场定制;可带 budgetEstimate;可带 parked(默认 false,true → state='parked' 入册不 spawn);可带 entity(entity-slug,缺省=项目自身,已有底座 → 回执 baseDossier.exists=true,没有 → draftNeeded=true 且 clarify 扩展产出底座初稿)。**中文 title 建议配显式 id 入参(格式 [a-z0-9-]+)**:提供 id 时 projectId=uniqueProjectId(workspaceDir, id),title 自由中文;纯中文 title 未提供 id 会拒收并提示提供 id(不引入拼音依赖);混合 title(含 ASCII 片段)未提供 id 维持现状 slugify。返回项目 id、state、流程概要、底座信息。
 2. project_advance:推进到下一阶段。**存在未解决卡点(project_block)会拒绝**;门禁 pending 会拒绝;**门禁未呈递(gateStatus=null)也会拒绝**——必须先 present 呈递并等用户裁决(2026-08-29 实测收紧:协调者曾未呈递直接穿过门禁);approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1);在最后阶段不给 appendStages = 结项(state→delivered,此后不可再推进)。**parked 项目只能经 activate:true 激活(parked→active,stageIndex=0),否则一律拒绝**。常规推进自动写 journal;结项不写 journal、返回 delivered:true。**可带 sessions:[{sessionId,role}] 登记 spawn 返回的 subagentId(主路会话捕获)**;推进时自动归集本项目私有会话真实 tokenUsage 写 committed(source=runtime-events),返回 collected 状态。
 3. project_gate:门禁两步。present 把摘要/材料/建议写成门禁包并置 pending;decide 记录用户裁决(approve/revise/reject),revise 必给 reviseTo(流程中已有的 work 阶段 id),reject 使项目终态。
 4. project_budget:get 查账(含 totals);set-estimate / set-cap 设估算与上限;commit 逐阶段上报消耗(stageId/role/usage,source 默认 self-report)。**source='runtime-events' 且 usage 缺省时插件按调用者会话 id 读 projcache 自动填真实 token 四桶**。
 5. project_status:不带 projectId 列出工作区全部项目(含未解决卡点数);带 projectId 看单项目详情(当前阶段/门禁态/预算聚合/SUMMARY 是否存在/卡点数)。
-6. project_block:卡点通道(优先上报,禁止降级)。report 登记(category=五维可行性维度+other)并卡住推进;resolve 记录用户裁决结论后解卡;list 查看。
-7. role_list / role_show:查角色清单;role_show 返回可直接拷进 subagent 调用的参数(persona/toolFilter/agentOptions)与 workspaceNote。
-8. flow_list / flow_show:查流程模板(含 stageCount/stages),workspace 库覆盖 preset 自带。
+6. project_block:卡点通道(优先上报,禁止降级)。report 登记(category=核心集(五维+other)+ .dsh-library/categories.json 扩展,运行时按合并集校验)并卡住推进;resolve 记录用户裁决结论后解卡;list 查看。
+7. project_harvest:维护 lessons 消费路由索引(AC1,harvest 阶段调用)。rebuild-index 扫 lessons/ + patterns/ 读元数据按 category 归类重建 lessons-index.json(保留既有 hits);bump-hits(lessonRefs:[id])递增命中篇目 hits。
+8. project_budget:get 查账(含 totals);set-estimate / set-cap 设估算与上限;commit 逐阶段上报消耗(stageId/role/usage,source 默认 self-report)。**source='runtime-events' 且 usage 缺省时插件按调用者会话 id 读 projcache 自动填真实 token 四桶**。
+9. project_status:不带 projectId 列出工作区全部项目(含未解决卡点数);带 projectId 看单项目详情(当前阶段/门禁态/预算聚合/SUMMARY 是否存在/卡点数)。
+10. role_list / role_show:查角色清单;role_show 返回可直接拷进 subagent 调用的参数(persona/toolFilter/agentOptions)与 workspaceNote。
+11. flow_list / flow_show:查流程模板(含 stageCount/stages),workspace 库覆盖 preset 自带。
 
 ### spawn 纪律
 必须用 per-role 工具名(subagent_<role> / subagent_devhelper)spawn 角色;通用 subagent/subagent_fork 已不可见(机制保证)。
@@ -1464,6 +1635,7 @@ SPEC(clarify 阶段)必须含「可行性分析」章,五维逐条给结论(可�
 - 测试可行性(环境与数据):验证所需环境(浏览器/上游/数据/凭据)是否可得;**不可得 → 哪些验收标准无法真实验证,必须 project_block 上报,禁止以静态检查替代放行**;
 - 部署可行性(权限):目标路径可写性/沙箱边界/凭据/重启窗口/需用户侧配合的事项(APPLY.md 交接);
 - 验收可行性(验收者能力):最终"好不好"由谁判定、判定者是否具备手段(如视觉验收必须有眼睛——流水线角色无浏览器无视觉,视觉类验收必须由用户侧执行并设为 blocking 门禁,不得排为交付后事项)。
+- 每一维先「查底座(.dsh-project 登记簿 / .dsh-base)+ .dsh-library/lessons-index.json 再下结论」(P4,2026-09-02):按该维对应 category 查 lessons-index 命中既有 lesson/裁决 → 直接引用不重复上报;未命中照常分析/上报。
 任一维度"有条件/不可行"→ SPEC 显著标注 + 登记 project_block;spec-gate 呈递前自查本章完备。
 
 ### 卡点纪律(优先上报,禁止降级,2026-08-30 流程补丁)
@@ -1488,8 +1660,16 @@ SPEC(clarify 阶段)必须含「可行性分析」章,五维逐条给结论(可�
 - 落点:workspace 库 <workspace>/.dsh-library/rulings.json(用户可自增裁决免部署、免重启;角色 read 即读)。
 - 种子四条:①视觉/真实观感类验收=用户侧 blocking 于 delivered,手段=截图+视觉模型/DOM 双核验;②pipeline-ws 外路径=deliverables/+APPLY.md 外交接,用户侧代应用;③preset/宿主插件改动=deploy 至 IN SYNC+重启,重启窗口并入攒批;④真实上游/凭据/夜间无人值守类验证=用户侧 blocking。
 - 引用规则(product 五维可行性分析时):先读裁决库;命中既定裁决(同 category 且前提一致)→ 直接引用该裁决结论,不再对同情形重复 project_block report;情形与既定裁决前提不一致或信息不足 → 照常上报。
-- 命中判据(m1-r3):不只看 category,还要看「情形是否与既定裁决前提一致」;前提不成立则命中失效、仍上报(如视觉类=用户侧 blocking 的前提是「有视觉产物且流水线角色无视觉」;若该前提不成立,则 r1 不命中,照常上报)。
+- 命中判据(m1-r3 + 0.11.0 negative-premises):不只看 category,还要看「情形是否与既定裁决前提一致」;前提不成立则命中失效、仍上报(如视觉类=用户侧 blocking 的前提是「有视觉产物且流水线角色无视觉」;若该前提不成立,则 r1 不命中,照常上报)。0.11.0 起每条裁决可带「negative-premises」(否定面,何种情形**不**命中)与「basis」(机制版本锚,preset 版本/日期,harvest 复查提示)——命中判据 = premise 命中 + negative-premises 不命中才引用。
 - 用户可自增:追加 rulings 数组条目即可,免部署、免重启。
+
+### 记忆治理·消费路由优先(P4,2026-09-02)
+- 目的:先让既有记忆(lessons/rulings)被消费路由到,再谈治理。lessons-index.json(category → 篇目/前提/状态/hits)由 harvest 维护。
+- 消费路由:product 五维分析的每一维先「查底座 + lessons-index 再下结论」(维度与 category 天然同构——design-info/dev-complexity/test-env/deploy-permission/acceptance-capability 即五维);coordinator 派活提示带相关 lessons 引用;命中既有 lesson/裁决 → 直接引用,不重复上报(AC6)。
+- harvest 维护:internalize 阶段协调者调 project_harvest rebuild-index 重建索引(保留 hits);每笔真实消费后 bump-hits 记一次。
+- BLOCKER_CATEGORIES 开放:核心集(五维 + other)∪ <workspace>/.dsh-library/categories.json 扩展(同名去重扩展胜,核心 6 类恒在;缺失/坏 JSON 回退核心集)。存量 other 历史 blocker 不动。
+- lessons 元数据:每篇 lessons/*.md 与 patterns/*.md 头部 front-matter 登记 origin/category/premises/status;rebuild-index 逐篇解析归类,元数据缺失 → uncategorized 并告警不炸。
+- 查重纪律:harvest 登记新 lesson 前先查 lessons-index,同 category 同 premise → 提示「追加到既有而非新建」。
 
 ### 失败模式聚合(机制2,2026-08-30 流程补丁)
 - harvest(internalize)阶段聚合步骤:扫 pipeline-ws 全部项目 REGISTRY 的 blockers 历史(含 delivered/终态,不遗漏),按 category 计数;同 category ≥2 → 生成四要素报告(类别/次数/代表案例(项目 id+卡点 id+原因摘要)/机制项建议)。
@@ -1749,8 +1929,7 @@ export function apply(ctx, config = {}) {
         action: { type: 'string', enum: ['report', 'resolve', 'list'], description: 'report=登记卡点;resolve=记录裁决并解卡;list=查看全部。' },
         category: {
           type: 'string',
-          enum: [...BLOCKER_CATEGORIES],
-          description: 'report 用,卡点分类=五维可行性维度:design-info=设计信息不完备;dev-complexity=开发复杂度超限;test-env=测试环境/数据不具备;deploy-permission=部署权限/沙箱限制;acceptance-capability=验收手段与验收者能力不匹配(如视觉验收无视觉);other=其他。',
+          description: 'report 用,卡点分类=核心集(design-info=设计信息不完备;dev-complexity=开发复杂度超限;test-env=测试环境/数据不具备;deploy-permission=部署权限/沙箱限制;acceptance-capability=验收手段与验收者能力不匹配(如视觉验收无视觉);other=其他)+ .dsh-library/categories.json 扩展(运行时按合并集校验)。',
         },
         reason: { type: 'string', description: 'report 必填:卡点是什么、为什么在当前能力/环境下无法解决(非空)。' },
         raisedBy: { type: 'string', description: '上报方(角色 id 或 coordinator/intake)。' },
@@ -1783,6 +1962,35 @@ export function apply(ctx, config = {}) {
     },
     async execute(args, context) {
       return api.block(args, context);
+    },
+  });
+
+  ctx.tools.register({
+    name: 'project_harvest',
+    description: '维护 lessons 消费路由索引(AC1,harvest 阶段协调者调用)。action=rebuild-index:扫 .dsh-library/lessons/ + .dsh-library/patterns/ 读各篇目 front-matter 元数据(origin/category/premises/status),按 category 归类重建 lessons-index.json(保留既有 hits,缺失/坏索引当空基线),返回归类统计;action=bump-hits:入参 lessonRefs:[id],对索引中命中篇目 hits+1,返回递增明细与未命中 id。',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['rebuild-index', 'bump-hits'], description: 'rebuild-index=重建消费路由索引;bump-hits=递增命中篇目 hits。' },
+        lessonRefs: { type: 'array', items: { type: 'string' }, description: 'bump-hits 必给:被消费路由引用的 lesson id 数组(非空字符串)。' },
+      },
+      required: ['action'],
+    },
+    output: {
+      schema: HARVEST_OUTPUT_SCHEMA,
+      render: (args, value) => {
+        if (value.action === 'rebuild-index') {
+          return [{ type: 'text', text: [
+            `已重建 lessons 消费路由索引(${value.indexFile})`,
+            `共 ${value.entriesTotal} 篇目,归入 ${value.categoriesCount} 个 category:${value.categories.map((c) => `${c.category}=${c.count}`).join(', ')}`,
+          ].join('\n') }];
+        }
+        return [{ type: 'text', text: `已递增 hits:${value.bumped.length > 0 ? value.bumped.map((b) => `${b.id}=${b.hits}`).join(', ') : '(无命中)'}${value.misses.length > 0 ? `;未命中(未收录):${value.misses.join(', ')}` : ''}` }];
+      },
+    },
+    async execute(args, context) {
+      return api.harvest(args, context);
     },
   });
 

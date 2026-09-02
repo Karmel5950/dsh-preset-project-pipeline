@@ -13,6 +13,6 @@
     { "id": "accept", "type": "work", "role": "product", "note": "代用户首轮验收:按 SPEC 验收标准逐条核对,不过打回 build 内部返工;凡影响判定却无法真实验证的项(浏览器视觉/真实上游等)必须 project_block 上报等裁决,禁止以静态检查替代放行" },
     { "id": "delivery-gate", "type": "gate", "title": "交付验收", "present": ["DELIVERY.md"] },
     { "id": "wrap", "type": "summary" },
-    { "id": "harvest", "type": "internalize" }
+    { "id": "harvest", "type": "internalize", "note": "内化收割。P4:调 project_harvest rebuild-index 重建 lessons-index.json(消费路由索引,保留 hits);按需 bump-hits;追加 .dsh-library/ 可复用资产(角色/流程变体/教训)" }
   ]
 }

@@ -2,6 +2,20 @@
 
 本 preset 的全部显著变更记录在此文件。
 
+## [0.11.0] - 2026-09-02
+
+记忆治理·消费路由优先(kr-p4-route 交付;背景:lessons/rulings 无代码消费=死档案,治理没人读的库没有意义——先路由后治理)。
+
+- **lessons-index.json 消费路由索引**:category → 篇目/前提/状态/hits,由 harvest 维护;新增 project_harvest 工具(action=rebuild-index 扫 .dsh-library/lessons+patterns 读元数据归类重建索引保留 hits;action=bump-hits 引用递增)作为 harvest 阶段确定性维护入口。存量 31 篇(lessons 27 + patterns 4)已全量归类(7 category)
+- **product 五维分析插消费路由步骤**:roles/product.json persona 增「查底座 + lessons-index 再下结论」(维度与 category 天然同构);readings 增 lessons-index.json/rulings.json。coordinator 派活提示带相关 lessons 引用,readings 增 lessons-index
+- **rulings 增强(只增不改)**:每条增 negative-premises(何种情形不命中)与 basis(机制版本锚:preset 版本/日期,harvest 复查提示);matchRuling 否定面逻辑单测锁定
+- **BLOCKER_CATEGORIES 开放**:封闭枚举改为「核心集 + .dsh-library/categories.json 扩展」(workspace 级,用户可自增免部署免重启);resolveBlockerCategories 单一权威(project-lib),registry 不再维护独立枚举消除双份漂移;project_block 的 category schema 放开为 type:string 运行时合并集校验;存量 other 历史 blocker 不动
+- **lessons/patterns 元数据**:31 篇头部 front-matter(origin/category/premises/status)
+- **prompt-render 渲染闸门测试(AC7)**:test/prompt-render.test.mjs 四断言——mock ctx 调 apply() 捕获 manual section 注册;从 dsh-agent-loop 源码动态提取生产注册变量集;真实 dsh-system-prompt renderPrompt 渲染 MANUAL_TEXT 不抛错;含 {{base}} 字面量的事故样本必须抛 unknown prompt variable(2026-09-02 v0.10.0 事故的回归闸)
+- **agent.cordis.yml**:subagent_coordinator 行 allow 补 project_harvest
+- 版本 0.10.0 → **0.11.0(minor)**:新工具 + categories 开放 + 索引 = 能力新增
+- 测试:project-lib 22 / project-registry 62 / project-p4 13(新)/ project-harvest 4(新)/ prompt-render 4(新)/ project-roles 23 / project-delete-guard 14 全绿;verify-c4c ALL_PASS=true(coordinator 931)
+
 ## [0.10.0] - 2026-09-01
 
 项目底座层 Base Dossier(kr-p1-base 交付;背景:实体仓每迭代"五遍读书重导入税"——跨迭代上下文无处安放,角色每次进场全量重读)。
