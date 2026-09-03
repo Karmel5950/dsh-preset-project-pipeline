@@ -1402,6 +1402,121 @@ test('parked:gate/block 对 parked 项目 assertActive 拒绝(AC-m4-t2)', async 
   assert.equal(detail.project.state, 'parked');
 });
 
+// ── kr-parked-exit:parked 取消通道(暂存项目可终止)────────────────────────
+
+test('parked:cancel:true + reason → state=rejected,journal 记理由,REGISTRY 其余字段不动(AC1)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'Cancel Me', requirement: 'r', flowTemplate: 'mini-flow', parked: true }, context);
+  const paths = registryPaths(workspace, 'cancel-me');
+  const before = await readJson(paths.registryFile);
+  const result = await getTool(ctx, 'project_advance').execute({ projectId: 'cancel-me', cancel: true, reason: '探针验证完成,终止' }, context);
+  assert.equal(result.cancelled, true);
+  assert.equal(result.state, 'rejected');
+  assert.equal(result.delivered, false);
+  assert.equal(result.stageIndex, 0);
+  const after = await readJson(paths.registryFile);
+  assert.equal(after.state, 'rejected', 'state → rejected');
+  assert.notEqual(after.updatedAt, before.updatedAt, 'updatedAt 刷新');
+  // REGISTRY 其余字段不动
+  assert.equal(after.id, before.id);
+  assert.equal(after.title, before.title);
+  assert.equal(after.flowRef, before.flowRef);
+  assert.equal(after.iteration, before.iteration);
+  assert.equal(after.stageIndex, before.stageIndex);
+  assert.equal(after.schemaVersion, before.schemaVersion);
+  assert.equal(after.entitySlug, before.entitySlug);
+  // journal 记取消理由
+  const journal = await readFile(join(paths.journalDir, '01-do.md'), 'utf8');
+  assert.ok(journal.includes('取消'), 'journal 应含取消记录');
+  assert.ok(journal.includes('探针验证完成,终止'), 'journal 应含取消理由');
+  // 终态后拒绝继续变更(activate 也拒)
+  await assert.rejects(
+    () => getTool(ctx, 'project_advance').execute({ projectId: 'cancel-me', activate: true }, context),
+    /终态/,
+  );
+});
+
+test('parked:cancel 缺 reason / reason 空白拒绝,不落盘(AC1 前置)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'Cancel NoReason', requirement: 'r', flowTemplate: 'mini-flow', parked: true }, context);
+  await assert.rejects(
+    () => getTool(ctx, 'project_advance').execute({ projectId: 'cancel-noreason', cancel: true }, context),
+    /reason/,
+  );
+  await assert.rejects(
+    () => getTool(ctx, 'project_advance').execute({ projectId: 'cancel-noreason', cancel: true, reason: '   ' }, context),
+    /reason/,
+  );
+  const registry = await readJson(registryPaths(workspace, 'cancel-noreason').registryFile);
+  assert.equal(registry.state, 'parked', '缺 reason 不落盘,仍 parked');
+});
+
+test('parked:cancel 非 parked 项目一律拒绝(active/delivered/rejected)(AC2)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  // active 项目
+  await getTool(ctx, 'project_register').execute({ title: 'Active Cancel', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  await assert.rejects(
+    () => getTool(ctx, 'project_advance').execute({ projectId: 'active-cancel', cancel: true, reason: 'x' }, context),
+    /仅限 parked/,
+  );
+  // delivered 项目:推进到结项
+  await getTool(ctx, 'project_register').execute({ title: 'Delivered Cancel', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  await advanceTo(t, ctx, workspace, 'delivered-cancel', 2); // → wrap(最后阶段)
+  await getTool(ctx, 'project_advance').execute({ projectId: 'delivered-cancel' }, context); // → delivered
+  assert.equal((await readJson(registryPaths(workspace, 'delivered-cancel').registryFile)).state, 'delivered');
+  await assert.rejects(
+    () => getTool(ctx, 'project_advance').execute({ projectId: 'delivered-cancel', cancel: true, reason: 'x' }, context),
+    /仅限 parked/,
+  );
+  // rejected 项目:经 gate reject 置终态
+  await getTool(ctx, 'project_register').execute({ title: 'Rejected Cancel', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  await getTool(ctx, 'project_advance').execute({ projectId: 'rejected-cancel' }, context); // → review
+  await getTool(ctx, 'project_gate').execute({ projectId: 'rejected-cancel', stageId: 'review', action: 'present', package: { summary: 's' } }, context);
+  await getTool(ctx, 'project_gate').execute({ projectId: 'rejected-cancel', stageId: 'review', action: 'decide', decision: { verdict: 'reject', comment: '不做了' } }, context);
+  assert.equal((await readJson(registryPaths(workspace, 'rejected-cancel').registryFile)).state, 'rejected');
+  await assert.rejects(
+    () => getTool(ctx, 'project_advance').execute({ projectId: 'rejected-cancel', cancel: true, reason: 'x' }, context),
+    /仅限 parked/,
+  );
+});
+
+test('parked:cancel happy path——status 可见 rejected,id 不释放复用(AC3)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'Happy Cancel', requirement: 'r', flowTemplate: 'mini-flow', parked: true }, context);
+  const result = await getTool(ctx, 'project_advance').execute({ projectId: 'happy-cancel', cancel: true, reason: '验证完成,终止' }, context);
+  assert.equal(result.cancelled, true);
+  assert.equal(result.state, 'rejected');
+  // status 可见 rejected
+  const detail = await getTool(ctx, 'project_status').execute({ projectId: 'happy-cancel' }, context);
+  assert.equal(detail.project.state, 'rejected');
+  // id 不释放复用:同名再登记 → 递增 -2(不复用原 id)
+  const again = await getTool(ctx, 'project_register').execute({ title: 'Happy Cancel', requirement: 'r', flowTemplate: 'mini-flow', parked: true }, context);
+  assert.equal(again.projectId, 'happy-cancel-2', 'id 不释放复用,递增 -2');
+  // 取消后 budget/status 仍可用(终态只禁 advance/gate/block)
+  const budget = await getTool(ctx, 'project_budget').execute({ projectId: 'happy-cancel', action: 'get' }, context);
+  assert.equal(budget.totals.entries, 0);
+});
+
+test('parked:MANUAL_TEXT 手册段含取消通道句(kr-parked-exit)', async () => {
+  const ctx = await mountPlugin();
+  const section = ctx.systemPrompt.items[0];
+  assert.ok(section.text.includes('取消通道'), '手册段应含「取消通道」');
+  assert.ok(section.text.includes('cancel:true'), '手册段应含 cancel:true 用法');
+  assert.ok(section.text.includes('仅限 parked'), '手册段应含「仅限 parked」约束');
+});
+
 // ── 0.8.0 真实 token 计量:会话登记 / commit 自动填 / advance 联动 collect ──
 
 test('会话登记:register 记 intake(auto-record);advance 记 coordinator(auto-record)', async (t) => {

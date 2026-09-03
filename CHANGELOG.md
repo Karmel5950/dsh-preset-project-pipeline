@@ -2,6 +2,21 @@
 
 本 preset 的全部显著变更记录在此文件。
 
+## [0.14.0] - 2026-09-03
+
+parked 退出通道:暂存项目可取消(kr-parked-exit 交付;背景:kr-entity-mutex 真机验证中探针 parked 后无法 reject 终止,「parked 进得去出不来」,登记纪律「探针类 parked:true + 验证后 reject 终止」兑现不了)。
+
+- **project_advance 新增 parked 取消通道**:parked 项目经 `project_advance(projectId, cancel:true, reason)` → `state=rejected`(终态语义与既有 rejected 一致)+ `updatedAt` 刷新 → journal 记取消理由 → 返回终态(`cancelled:true, state:'rejected'`)。登记簿保留(审计可查),**id 不释放复用**。
+- **reason 必填**:非空字符串,缺失/空白拒绝且不落盘(AC1 前置)。
+- **非 parked 项目调用 cancel 一律拒绝**(active/delivered/rejected,仅限 parked)。
+- **取消触发 budget 结算联动 collect**(幂等+非致命,与结项一致尝试)。
+- **工具 schema**:project_advance 增 `cancel`/`reason` 入参;`ADVANCE_OUTPUT_SCHEMA.state` enum 增 `rejected`、增可选 `cancelled`;render 增取消分支。
+- **MANUAL_TEXT 增补**:「工具速查」project_advance 条目补「或 cancel:true 取消(parked→rejected,终态,reason 必填)」;「暂存区 parked 语义(机制4)」新增「**取消通道(kr-parked-exit)**」句,状态机校验句补 `activate/cancel`。
+- 版本 0.13.0 → **0.14.0(minor)**:parked 直接终止通道落地 = 能力新增。
+- 测试:project-registry 72→**77**(新增 parked cancel AC1/AC1 前置/AC2/AC3 happy path/MANUAL_TEXT 断言 5 例)。preset 全量 165→**170** 例,lib+registry 106/106 绿;`verify-c4c` 通过;prompt-render AC7-①(manual section 注册)通过(AC7-②③④ 依赖真实 dsh-runtime,真实仓库绿)。
+- **AC3 真机验证(r4)**:真实实例上对滞留探针 `cn-probe`、`kr-entity-mutex-probe` 执行 cancel → state=rejected + journal 记理由 + 看板移出暂存区 = 用户侧 blocking 执行,流水线只做单测/静态核对。
+- 触点:presets/project-pipeline/(project-registry.mjs、MANUAL_TEXT、test/)→ **r2 交付 deliverables/ + APPLY.md** + **r3 deploy 至 IN SYNC + 重启**(重启窗口并入攒批)。
+
 ## [0.13.0] - 2026-09-03
 
 entity 底座互斥显式化:隐式触点显式化(kr-entity-mutex 交付;背景:项目间并发靠触点声明互斥,但触点只覆盖显式文件路径;`.dsh-base/<entity>/` 是跨项目隐式共享写,同 entity 两个 active 项目并行迭代会竞争写同一底座)。

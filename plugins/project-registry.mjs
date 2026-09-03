@@ -828,9 +828,60 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
       }
     }
 
+    // 机制4 扩展(kr-parked-exit):cancel 仅限 parked 项目。非 parked(active/delivered/
+    // rejected)调用 cancel 一律拒绝——取消是 parked 专属终止通道。
+    if (args.cancel === true && registry.state !== 'parked') {
+      throw new Error(`${name}/project_advance: cancel 仅限 parked(暂存)项目;当前项目状态为 ${registry.state},不支持取消`);
+    }
+
     // 机制4:parked 激活路径。parked 项目只能经 activate:true 激活(parked→active,
     // stageIndex=0/clarify),否则一律拒绝(不进入常规推进/结项)。
     if (registry.state === 'parked') {
+      if (args.cancel === true) {
+        // 机制4 扩展(kr-parked-exit):parked 直接终止通道。校验 reason 非空 →
+        // state=rejected(终态语义与既有 rejected 一致)+ updatedAt → journal 记取消理由 →
+        // 返回终态。登记簿保留(审计可查),id 不释放复用。
+        if (!nonEmptyString(args.reason)) {
+          throw new Error(`${name}/project_advance: 取消 parked 项目必须提供 reason(非空字符串),用于 journal 记录取消理由`);
+        }
+        const now = new Date().toISOString();
+        registry.state = 'rejected';
+        registry.updatedAt = now;
+        await writeJson(paths.registryFile, registry);
+        // journal 记取消理由(当前阶段 journal 文件;缺失则创建)。
+        const stageId = stages[0]?.id ?? 'parked';
+        const journalPath = join(paths.journalDir, gateFileName(0, stageId));
+        const cancelNote = [
+          `# 取消(parked → rejected)`,
+          '',
+          `- 项目:${projectId}`,
+          `- 取消时间:${now}`,
+          `- 取消理由:${args.reason}`,
+          '',
+        ].join('\n');
+        if (existsSync(journalPath)) await appendFile(journalPath, `\n---\n\n${cancelNote}`, 'utf8');
+        else {
+          await mkdir(paths.journalDir, { recursive: true });
+          await writeText(journalPath, cancelNote);
+        }
+        // 结算联动 collect(幂等+非致命;取消也是结算点,与结项一致尝试)。
+        let collected;
+        try {
+          collected = await collectRuntimeEvents({ workspaceDir, projectId, paths, registry });
+        } catch (error) {
+          collected = { ok: false, buckets: {}, note: `归集异常:${error?.message ?? error}` };
+        }
+        return {
+          stageIndex: 0,
+          iteration: registry.iteration,
+          stage: stages[0] ? stageBrief(stages[0], 0) : null,
+          journalPath,
+          delivered: false,
+          state: 'rejected',
+          cancelled: true,
+          collected,
+        };
+      }
       if (args.activate === true) {
         // entity 互斥显式化(0.13.0,kr-entity-mutex):激活(parked→active)时对同 entity
         // active 项目做互斥检测(排除自身)。命中 → 明确拒绝激活(不静默并行),须待
@@ -1703,8 +1754,9 @@ const ADVANCE_OUTPUT_SCHEMA = {
     stage: stageBriefSchema(),
     journalPath: { oneOf: [{ type: 'string' }, { type: 'null' }] },
     delivered: { type: 'boolean' },
-    state: { type: 'string', enum: ['active', 'parked', 'delivered'] },
+    state: { type: 'string', enum: ['active', 'parked', 'delivered', 'rejected'] },
     activated: { type: 'boolean' },
+    cancelled: { type: 'boolean' },
     collected: collectedSchema(),
     entityConflict: entityConflictSchema(),
   },
@@ -1813,7 +1865,7 @@ const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
 
 ### 工具速查(登记簿 7 + 库 4)
 1. project_register:登记新项目。title+requirement 必填;flowTemplate 选模板(默认 standard-flow)或给 flowStages 现场定制;可带 budgetEstimate;可带 parked(默认 false,true → state='parked' 入册不 spawn);可带 entity(entity-slug,缺省=项目自身,已有底座 → 回执 baseDossier.exists=true,没有 → draftNeeded=true 且 clarify 扩展产出底座初稿)。**中文 title 建议配显式 id 入参(格式 [a-z0-9-]+)**:提供 id 时 projectId=uniqueProjectId(workspaceDir, id),title 自由中文;纯中文 title 未提供 id 会拒收并提示提供 id(不引入拼音依赖);混合 title(含 ASCII 片段)未提供 id 维持现状 slugify。返回项目 id、state、流程概要、底座信息。
-2. project_advance:推进到下一阶段。**存在未解决卡点(project_block)会拒绝**;门禁 pending 会拒绝;**门禁未呈递(gateStatus=null)也会拒绝**——必须先 present 呈递并等用户裁决(2026-08-29 实测收紧:协调者曾未呈递直接穿过门禁);approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1);在最后阶段不给 appendStages = 结项(state→delivered,此后不可再推进)。**parked 项目只能经 activate:true 激活(parked→active,stageIndex=0),否则一律拒绝**。常规推进自动写 journal;结项不写 journal、返回 delivered:true。**可带 sessions:[{sessionId,role}] 登记 spawn 返回的 subagentId(主路会话捕获)**;推进时自动归集本项目私有会话真实 tokenUsage 写 committed(source=runtime-events),返回 collected 状态。
+2. project_advance:推进到下一阶段。**存在未解决卡点(project_block)会拒绝**;门禁 pending 会拒绝;**门禁未呈递(gateStatus=null)也会拒绝**——必须先 present 呈递并等用户裁决(2026-08-29 实测收紧:协调者曾未呈递直接穿过门禁);approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 的 work 阶段;在最后阶段给 appendStages 开新迭代(iteration+1);在最后阶段不给 appendStages = 结项(state→delivered,此后不可再推进)。**parked 项目只能经 activate:true 激活(parked→active,stageIndex=0)或 cancel:true 取消(parked→rejected,终态,reason 必填),否则一律拒绝**。常规推进自动写 journal;结项不写 journal、返回 delivered:true。**可带 sessions:[{sessionId,role}] 登记 spawn 返回的 subagentId(主路会话捕获)**;推进时自动归集本项目私有会话真实 tokenUsage 写 committed(source=runtime-events),返回 collected 状态。
 3. project_gate:门禁两步。present 把摘要/材料/建议写成门禁包并置 pending;decide 记录用户裁决(approve/revise/reject),revise 必给 reviseTo(流程中已有的 work 阶段 id),reject 使项目终态。
 4. project_budget:get 查账(totals 含统一总 token totalToken / 按 model 分组 byModel / 缓存率 cacheRate / 按 role 展开 byRoleTotal);set-estimate / set-cap 设估算与上限;commit 逐阶段上报消耗(stageId/role/usage,source 默认 self-report)。**source='runtime-events' 且 usage 缺省时插件按调用者会话 id 读 projcache 自动填真实 token(四桶+model/provider,model 取本会话 agent 路由)**。
 5. project_status:不带 projectId 列出工作区全部项目(含未解决卡点数);带 projectId 看单项目详情(当前阶段/门禁态/预算聚合(含统一总 token)/SUMMARY 是否存在/卡点数)。
@@ -1887,7 +1939,8 @@ SPEC(clarify 阶段)必须含「可行性分析」章,五维逐条给结论(可�
 - register 增 parked 参数(默认 false):parked:true → REGISTRY.state='parked',登记入册(REGISTRY/FLOW/BUDGET/REQUIREMENT 照常创建,stageIndex=0)但不 spawn 协调者。
 - 入册不 spawn:intake 登记后查 state,state==='parked' → 不 spawn 协调者;state==='active' → spawn 协调者从 clarify 开始。
 - 激活路径:project_advance(projectId, activate:true) → parked→active,stageIndex=0(clarify);激活后 intake 按 state=active spawn 协调者从 clarify 开始。
-- 状态机校验:parked 项目不设 activate 时,advance 一律拒绝(不进入常规推进/结项);gate/block 对 parked 项目 assertActive 拒绝(无 active 流程,不呈递门禁/不登记卡点);budget/status 对任何 state 可用。
+- **取消通道(kr-parked-exit)**:parked 项目可直接终止——project_advance(projectId, cancel:true, reason) → parked→rejected(终态语义与既有 rejected 一致),journal 记取消理由,登记簿保留(审计可查),id 不释放复用;非 parked 项目调用 cancel 一律拒绝(仅限 parked)。
+- 状态机校验:parked 项目不设 activate/cancel 时,advance 一律拒绝(不进入常规推进/结项);gate/block 对 parked 项目 assertActive 拒绝(无 active 流程,不呈递门禁/不登记卡点);budget/status 对任何 state 可用。
 - 触点比对:parked 项目进触点比对但标注不冲突(仅 active 项目冲突才上抛 project_block)。
 - **激活冲突检测(0.13.0,kr-entity-mutex)**:project_advance(activate:true) 激活时对同 entity active 项目做互斥检测(排除自身);命中 → 明确拒绝激活(不静默并行),须待 entity 空出或经用户裁决后再激活。
 - 看板:state=parked 项目进入「暂存区」独立分组呈现,不混入 active 列表;state.parked 徽章(zh「暂存」/en「Parked」)。
@@ -1984,7 +2037,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register({
     name: 'project_advance',
-    description: '推进项目流程指针到下一阶段。门禁待裁决时拒绝;approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 指定的 work 阶段;在最后阶段给 appendStages 可开启新迭代。parked 项目只能经 activate:true 激活(parked→active,stageIndex=0),否则一律拒绝;激活时对同 entity active 项目做互斥检测,命中 → 明确拒绝(不静默并行)。每次推进自动写 journal 并刷新 REGISTRY.updatedAt;可带 sessions:[{sessionId,role}] 登记 spawn 返回的 subagentId(主路会话捕获);推进时自动归集本项目私有会话真实 tokenUsage 写 committed(source=runtime-events),返回 collected 状态。',
+    description: '推进项目流程指针到下一阶段。门禁待裁决时拒绝;approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 指定的 work 阶段;在最后阶段给 appendStages 可开启新迭代。parked 项目只能经 activate:true 激活(parked→active,stageIndex=0)或 cancel:true 取消(parked→rejected,终态),否则一律拒绝;激活时对同 entity active 项目做互斥检测,命中 → 明确拒绝(不静默并行)。每次推进自动写 journal 并刷新 REGISTRY.updatedAt;可带 sessions:[{sessionId,role}] 登记 spawn 返回的 subagentId(主路会话捕获);推进时自动归集本项目私有会话真实 tokenUsage 写 committed(source=runtime-events),返回 collected 状态。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -1997,6 +2050,8 @@ export function apply(ctx, config = {}) {
           items: stageParamSchema(),
         },
         activate: { type: 'boolean', description: 'parked 项目激活用:true → parked→active,stageIndex=0(clarify);仅对 state=parked 项目生效。' },
+        cancel: { type: 'boolean', description: 'parked 项目取消用:true → parked→rejected(终态),journal 记取消理由;仅对 state=parked 项目生效,非 parked 调用一律拒绝。' },
+        reason: { type: 'string', description: 'cancel:true 时必填:取消理由(非空字符串),写入 journal 留痕。' },
         sessions: {
           type: 'array',
           description: '主路会话捕获:协调者 spawn 角色后把返回的 subagentId 以 [{ sessionId, role }] 传入,插件写入 REGISTRY.sessions(capturePath=spawn-pass)。',
@@ -2019,7 +2074,9 @@ export function apply(ctx, config = {}) {
         ? `项目 ${args.projectId} 已交付结项(state=delivered,第 ${value.iteration} 次迭代;最后阶段 ${value.stage.id})。后续推进会被拒绝;开新迭代请登记反馈后用 appendStages。${value.collected ? `归集:${value.collected.ok ? 'ok' : '跳过'}${value.collected.note ? `(${value.collected.note})` : ''}` : ''}`
         : value.activated
           ? `项目 ${args.projectId} 已激活(parked→active,state=active),从阶段 #${value.stageIndex + 1} ${value.stage?.id ?? ''}(${value.stage ? stageTypeLabel(value.stage.type) : ''})开始推进;请按 state=active spawn 协调者从 clarify 开始。`
-          : `项目 ${args.projectId} 推进到阶段 #${value.stageIndex + 1} ${value.stage.id}(${stageTypeLabel(value.stage.type)}${value.stage.role ? ` · ${value.stage.role}` : ''},第 ${value.iteration} 次迭代);日志:${value.journalPath}${value.collected ? `;归集:${value.collected.ok ? 'ok' : '跳过'}${value.collected.note ? `(${value.collected.note})` : ''}` : ''}` }],
+          : value.cancelled
+            ? `项目 ${args.projectId} 已取消(parked→rejected,终态)。取消理由:${args.reason ?? '(未记录)'};登记簿保留(审计可查),id 不释放复用。${value.collected ? `归集:${value.collected.ok ? 'ok' : '跳过'}${value.collected.note ? `(${value.collected.note})` : ''}` : ''}`
+            : `项目 ${args.projectId} 推进到阶段 #${value.stageIndex + 1} ${value.stage.id}(${stageTypeLabel(value.stage.type)}${value.stage.role ? ` · ${value.stage.role}` : ''},第 ${value.iteration} 次迭代);日志:${value.journalPath}${value.collected ? `;归集:${value.collected.ok ? 'ok' : '跳过'}${value.collected.note ? `(${value.collected.note})` : ''}` : ''}` }],
     },
     async execute(args, context) {
       return api.advance(args, context);
