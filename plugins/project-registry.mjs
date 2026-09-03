@@ -63,6 +63,12 @@
 //     project_status 详情 project.budget 增 totalToken + 按 role 的 totalToken 展开(byRoleTotal).
 //   - budgetTotalsSchema/budgetSnapshotSchema 扩展;MANUAL_TEXT 补「统一总 token 口径与缓存率」
 //     「model 来源说明」小节;makeApi 增 ctx(供 modelRoute 经 ctx.get('llm') 增强).
+// 0.13.0 新增(entity 底座互斥显式化,kr-entity-mutex,2026-09-03):
+//   - register 登记时 + advance(activate:true) 激活时做同 entity active 互斥检测
+//     (project-lib.entityConflictActive 纯函数);命中且非 parked → 明确拒绝(不静默并行),
+//     建议以 parked:true 排队;parked 登记回执/激活回执带 entityConflict 冲突信号.
+//   - REGISTER_OUTPUT_SCHEMA/ADVANCE_OUTPUT_SCHEMA 增 entityConflict(可选);
+//   - MANUAL_TEXT「资源触点互斥声明」「暂存区 parked 语义」补 entity 维度句.
 
 import { existsSync, readFileSync } from 'node:fs';
 import { appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
@@ -76,6 +82,7 @@ import {
   baseDossierExists,
   baseDossierPaths,
   cacheRate,
+  entityConflictActive,
   entitySlugOf,
   normalizeUsage,
   readJson,
@@ -601,6 +608,35 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
     return { ok: true, buckets, note: notes.length > 0 ? notes.join('; ') : undefined };
   }
 
+  /**
+   * 扫 workspace 全部项目 REGISTRY(含 non-active/parked),读坏跳过(不炸调用方)。
+   * id 字段缺失时以目录名补齐(与 scanRegistries 消费方 entitySlugOf 的缺省=自身兼容)。
+   */
+  async function scanRegistries(workspaceDir) {
+    const out = [];
+    let entries;
+    try {
+      entries = await readdir(workspaceDir, { withFileTypes: true });
+    } catch {
+      return out;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const id = entry.name;
+      const file = join(workspaceDir, id, cfg.registryDir, 'REGISTRY.json');
+      let reg;
+      try {
+        reg = JSON.parse(await readFile(file, 'utf8'));
+      } catch {
+        continue;
+      }
+      if (reg === null || typeof reg !== 'object') continue;
+      if (typeof reg.id !== 'string' || reg.id.length === 0) reg.id = id;
+      out.push(reg);
+    }
+    return out;
+  }
+
   // 1. project_register ──────────────────────────────────────────────────────
   async function register(args, context) {
     const workspaceDir = sessionWorkspace(context);
@@ -673,6 +709,20 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
     const basePaths = baseDossierPaths(workspaceDir, entitySlug);
     const baseExists = await baseDossierExists(workspaceDir, entitySlug);
     const draftNeeded = !baseExists;
+    // entity 互斥显式化(0.13.0,kr-entity-mutex):登记时做同 entity active 冲突检测。
+    // 命中且非 parked → 明确拒绝(不静默并行);parked:true = 用户显式排队 → 放行入册,
+    // 回执携带冲突信号(entityConflict)。不同 entity / legacy(缺省=自身)互不影响(R3)。
+    const existingRegistries = await scanRegistries(workspaceDir);
+    const conflict = entityConflictActive(entitySlug, existingRegistries);
+    const entityConflictSignal = {
+      conflict: conflict.conflict,
+      entity: entitySlug,
+      conflicts: conflict.conflicts,
+    };
+    if (conflict.conflict && args.parked !== true) {
+      const whom = conflict.conflicts.map((c) => `${c.projectId}(entity=${c.entitySlug})`).join('、');
+      throw new Error(`${name}/project_register: 同 entity 互斥冲突——entity "${entitySlug}" 已有 active 项目 ${whom} 并行迭代,会竞争写同一底座 <workspace>/.dsh-base/${entitySlug}/;本登记按显式互斥拒绝(不静默并行)。可选:①等既有项目结束(或经用户裁决排序)后再登记;②以 parked:true 入暂存排队(待 entity 空出后 project_advance(projectId, activate:true) 激活);③确需并行时先 project_block(category=other) 上抛用户裁决排序。`);
+    }
     const registry = {
       schemaVersion: 2,
       id: projectId,
@@ -724,6 +774,7 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
         exists: baseExists,
         draftNeeded,
       },
+      entityConflict: entityConflictSignal,
     };
   }
 
@@ -781,6 +832,21 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
     // stageIndex=0/clarify),否则一律拒绝(不进入常规推进/结项)。
     if (registry.state === 'parked') {
       if (args.activate === true) {
+        // entity 互斥显式化(0.13.0,kr-entity-mutex):激活(parked→active)时对同 entity
+        // active 项目做互斥检测(排除自身)。命中 → 明确拒绝激活(不静默并行),须待
+        // entity 空出或经用户裁决后再激活。
+        const candid = entitySlugOf(registry);
+        const existingActive = (await scanRegistries(workspaceDir)).filter((r) => r.id !== projectId);
+        const actConflict = entityConflictActive(candid, existingActive);
+        const entityConflictSignal = {
+          conflict: actConflict.conflict,
+          entity: candid,
+          conflicts: actConflict.conflicts,
+        };
+        if (actConflict.conflict) {
+          const whom = actConflict.conflicts.map((c) => `${c.projectId}(entity=${c.entitySlug})`).join('、');
+          throw new Error(`${name}/project_advance: 同 entity 互斥冲突——entity "${candid}" 已有 active 项目 ${whom} 并行迭代,会竞争写同一底座 <workspace>/.dsh-base/${candid}/;拒绝激活(不静默并行)。请等既有 entity 空出(结束/结项)或经用户裁决后再激活。`);
+        }
         const now = new Date().toISOString();
         registry.state = 'active';
         registry.updatedAt = now;
@@ -794,6 +860,7 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
           stage: first ? stageBrief(first, 0) : null,
           journalPath: null,
           delivered: false,
+          entityConflict: entityConflictSignal,
         };
       }
       throw new Error(`${name}/project_advance: 项目 ${projectId} 处于 parked(暂存)状态,需先激活(parked→active)才能推进;请用 project_advance(projectId, activate:true)`);
@@ -1574,6 +1641,31 @@ function baseDossierSchema() {
   };
 }
 
+function entityConflictSchema() {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      conflict: { type: 'boolean' },
+      entity: { type: 'string' },
+      conflicts: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            projectId: { type: 'string' },
+            entitySlug: { type: 'string' },
+            state: { type: 'string' },
+          },
+          required: ['projectId', 'entitySlug', 'state'],
+        },
+      },
+    },
+    required: ['conflict', 'entity', 'conflicts'],
+  };
+}
+
 const REGISTER_OUTPUT_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -1584,6 +1676,7 @@ const REGISTER_OUTPUT_SCHEMA = {
     flowSummary: { type: 'array', items: stageBriefSchema() },
     nextStage: stageBriefSchema(),
     baseDossier: baseDossierSchema(),
+    entityConflict: entityConflictSchema(),
   },
   required: ['projectId', 'projectDir', 'state', 'flowSummary', 'nextStage', 'baseDossier'],
 };
@@ -1613,6 +1706,7 @@ const ADVANCE_OUTPUT_SCHEMA = {
     state: { type: 'string', enum: ['active', 'parked', 'delivered'] },
     activated: { type: 'boolean' },
     collected: collectedSchema(),
+    entityConflict: entityConflictSchema(),
   },
   required: ['stageIndex', 'iteration', 'stage', 'journalPath', 'delivered', 'state'],
 };
@@ -1754,6 +1848,7 @@ SPEC(clarify 阶段)必须含「可行性分析」章,五维逐条给结论(可�
 - 协调者派活前对 active 项目清单做触点比对:读自己 SPEC 触点 → project_status 列全部 active → 逐个读其 SPEC 触点 → 冲突判定(同文件路径/同部署组件/同需重启窗口即冲突,目录级按包含关系)。
 - 冲突处理:project_block(category=other)上抛用户排序;open 期间不推进;intake 登记时发现触点重叠当场提示(不打断登记)。
 - **parked 项目进触点比对但标注不冲突**(机制4):读全部项目(含 parked)SPEC 触点;parked 项目与当前项目触点重叠 → 标注为不构成 active 冲突,不 project_block;仅 active 项目冲突才上抛。
+- **entity 互斥显式化·一等触点(0.13.0,kr-entity-mutex)**:entity 维度自动声明为「拟写 <workspace>/.dsh-base/<entity>/」,与显式文件路径同级参与比对(project-lib 的 entityTouchpoint 即底座路径)。register 登记时 / advance(activate:true) 激活时对同 entity active 项目做互斥检测(纯函数 entityConflictActive):命中且非 parked → 明确拒绝(不静默并行);parked 登记 = 显式排队(看板进暂存区),等待实体空出;不同 entity 与 legacy(entitySlug 缺省=项目自身)天然互异、互不影响。
 
 ### 重启决策规则(机制2,2026-08-30 流程补丁)
 - (a)必须重启清单:agent.cordis.yml 变更、preset 插件文件变更、profile node_modules/bundles 变更、cordis.patch.yml 变更。
@@ -1794,6 +1889,7 @@ SPEC(clarify 阶段)必须含「可行性分析」章,五维逐条给结论(可�
 - 激活路径:project_advance(projectId, activate:true) → parked→active,stageIndex=0(clarify);激活后 intake 按 state=active spawn 协调者从 clarify 开始。
 - 状态机校验:parked 项目不设 activate 时,advance 一律拒绝(不进入常规推进/结项);gate/block 对 parked 项目 assertActive 拒绝(无 active 流程,不呈递门禁/不登记卡点);budget/status 对任何 state 可用。
 - 触点比对:parked 项目进触点比对但标注不冲突(仅 active 项目冲突才上抛 project_block)。
+- **激活冲突检测(0.13.0,kr-entity-mutex)**:project_advance(activate:true) 激活时对同 entity active 项目做互斥检测(排除自身);命中 → 明确拒绝激活(不静默并行),须待 entity 空出或经用户裁决后再激活。
 - 看板:state=parked 项目进入「暂存区」独立分组呈现,不混入 active 列表;state.parked 徽章(zh「暂存」/en「Parked」)。
 
 ### 阶段类型四词表
@@ -1851,7 +1947,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register({
     name: 'project_register',
-    description: '登记新项目:创建 <workspace>/<projectId>/.dsh-project 登记簿骨架(REGISTRY/FLOW/BUDGET/REQUIREMENT.md),按模板或定制阶段实例化流程,返回项目 id、state、流程概要与底座信息。projectId 由标题清洗为 kebab slug,冲突自动 -2 递增;可传显式 id(英文 slug)与中文 title 解耦。可传 entity(entity-slug,缺省=项目自身):entity 已有底座 → 回执 baseDossier.exists=true;没有 → draftNeeded=true 且 clarify 阶段 produces 扩展底座初稿四件套(流程数据表达,不加新阶段类型)。parked:true → state=parked(入册不 spawn,看板进暂存区)。',
+    description: '登记新项目:创建 <workspace>/<projectId>/.dsh-project 登记簿骨架(REGISTRY/FLOW/BUDGET/REQUIREMENT.md),按模板或定制阶段实例化流程,返回项目 id、state、流程概要与底座信息。projectId 由标题清洗为 kebab slug,冲突自动 -2 递增;可传显式 id(英文 slug)与中文 title 解耦。可传 entity(entity-slug,缺省=项目自身):entity 已有底座 → 回执 baseDossier.exists=true;没有 → draftNeeded=true 且 clarify 阶段 produces 扩展底座初稿四件套(流程数据表达,不加新阶段类型)。parked:true → state=parked(入册不 spawn,看板进暂存区)。**同 entity 互斥显式化(0.13.0)**:登记时对同 entity active 项目做互斥检测——命中且非 parked 明确拒绝(不静默并行),建议以 parked:true 排队;parked 登记回执带 entityConflict 冲突信号。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -1878,6 +1974,7 @@ export function apply(ctx, config = {}) {
         `流程共 ${value.flowSummary.length} 个阶段;下一阶段 #${value.nextStage.index + 1} ${value.nextStage.id}(${stageTypeLabel(value.nextStage.type)}${value.nextStage.role ? ` · ${value.nextStage.role}` : ''})。`,
         `底座(entity=${value.baseDossier.entity}):${value.baseDossier.exists ? `已存在(${value.baseDossier.path})` : `无底座,需首轮 clarify 产出初稿(${value.baseDossier.path})`}`,
         value.state === 'parked' ? '项目处于暂存(parked)状态:已入册,未激活,不 spawn 协调者;激活请用 project_advance(projectId, activate:true)。' : '',
+        value.entityConflict?.conflict ? `entity 互斥信号:"${value.entityConflict.entity}" 已入暂存排队(现有 active 冲突:${value.entityConflict.conflicts.map((c) => c.projectId).join('、') || '无'}),待实体空出后再激活;不静默并行。` : '',
       ].filter(Boolean).join('\n') }],
     },
     async execute(args, context) {
@@ -1887,7 +1984,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register({
     name: 'project_advance',
-    description: '推进项目流程指针到下一阶段。门禁待裁决时拒绝;approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 指定的 work 阶段;在最后阶段给 appendStages 可开启新迭代。parked 项目只能经 activate:true 激活(parked→active,stageIndex=0),否则一律拒绝。每次推进自动写 journal 并刷新 REGISTRY.updatedAt;可带 sessions:[{sessionId,role}] 登记 spawn 返回的 subagentId(主路会话捕获);推进时自动归集本项目私有会话真实 tokenUsage 写 committed(source=runtime-events),返回 collected 状态。',
+    description: '推进项目流程指针到下一阶段。门禁待裁决时拒绝;approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 指定的 work 阶段;在最后阶段给 appendStages 可开启新迭代。parked 项目只能经 activate:true 激活(parked→active,stageIndex=0),否则一律拒绝;激活时对同 entity active 项目做互斥检测,命中 → 明确拒绝(不静默并行)。每次推进自动写 journal 并刷新 REGISTRY.updatedAt;可带 sessions:[{sessionId,role}] 登记 spawn 返回的 subagentId(主路会话捕获);推进时自动归集本项目私有会话真实 tokenUsage 写 committed(source=runtime-events),返回 collected 状态。',
     parameters: {
       type: 'object',
       additionalProperties: false,

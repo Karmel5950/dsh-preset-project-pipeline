@@ -316,11 +316,16 @@ test('project_register:entity 无底座时 clarify 阶段 produces 扩展底座�
   for (const p of ['base-dossier/MAP.md', 'base-dossier/DECISIONS.md', 'base-dossier/RUNBOOK.md', 'base-dossier/STATE.md']) {
     assert.ok(clarify.produces.includes(p), `clarify produces 应含 ${p}`);
   }
-  // 模板未被污染:再登记一个同 entity 无底座的项目,clarify produces 仍只含 SPEC.md(克隆语义)。
+  // 模板未被污染 + entity 互斥:同 entity 的第二个项目(active)会被显式互斥拒绝(不静默并行),
+  // 故此处以 parked:true 入暂存排队(显式队列)验证模板克隆语义 + 回执冲突信号。
   const second = await getTool(ctx, 'project_register').execute({
-    title: 'Draft2', id: 'draft2', requirement: 'r', flowTemplate: 'std', entity: 'new-entity',
+    title: 'Draft2', id: 'draft2', requirement: 'r', flowTemplate: 'std', entity: 'new-entity', parked: true,
   }, sessionContext(workspace));
+  assert.equal(second.state, 'parked', '同 entity 冲突 → 排队 parked');
   assert.equal(second.baseDossier.draftNeeded, true);
+  assert.equal(second.entityConflict.conflict, true, '回执携带冲突信号');
+  assert.equal(second.entityConflict.entity, 'new-entity');
+  assert.ok(second.entityConflict.conflicts.some((c) => c.projectId === 'draft'), '冲突指向首个 active 项目');
   const flow2 = await readJson(registryPaths(workspace, 'draft2').flowFile);
   assert.deepEqual(flow2.stages.find((s) => s.id === 'clarify').produces, ['SPEC.md', 'base-dossier/MAP.md', 'base-dossier/DECISIONS.md', 'base-dossier/RUNBOOK.md', 'base-dossier/STATE.md']);
 });
@@ -333,6 +338,83 @@ test('project_status:单项目详情含 entitySlug(经 entitySlugOf)', async (t)
   await getTool(ctx, 'project_register').execute({ title: 'Status Ent', id: 'status-ent', requirement: 'r', flowTemplate: 'mini-flow', entity: 'ent-x' }, context);
   const detail = await getTool(ctx, 'project_status').execute({ projectId: 'status-ent' }, context);
   assert.equal(detail.project.entitySlug, 'ent-x');
+});
+
+// ── entity 底座互斥显式化(kr-entity-mutex,0.13.0):Register / Activate 冲突检测 ──
+
+test('project_register:同 entity active 冲突 → 明确拒绝(不静默并行)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  const first = await getTool(ctx, 'project_register').execute({ title: 'A', id: 'proj-a', requirement: 'r', flowTemplate: 'mini-flow', entity: 'shared-entity' }, context);
+  assert.equal(first.entityConflict.conflict, false, '首个同 entity 无冲突');
+  await assert.rejects(
+    () => getTool(ctx, 'project_register').execute({ title: 'B', id: 'proj-b', requirement: 'r', flowTemplate: 'mini-flow', entity: 'shared-entity' }, context),
+    /同 entity 互斥冲突/,
+    '同 entity 第二个 active 项目应被明确拒绝',
+  );
+  assert.ok(!existsSync(registryPaths(workspace, 'proj-b').registryFile), '被拒后不落盘');
+});
+
+test('project_register:不同 entity → 放行;回执 entityConflict.conflict=false', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'A', id: 'proj-a', requirement: 'r', flowTemplate: 'mini-flow', entity: 'ent-a' }, context);
+  const b = await getTool(ctx, 'project_register').execute({ title: 'B', id: 'proj-b', requirement: 'r', flowTemplate: 'mini-flow', entity: 'ent-b' }, context);
+  assert.equal(b.projectId, 'proj-b');
+  assert.equal(b.entityConflict.conflict, false, '不同 entity → 放行');
+  assert.equal(b.entityConflict.entity, 'ent-b');
+});
+
+test('project_register:legacy(无 entity,缺省=自身)回归——两存量同态项目互不冲突(R3)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  const a = await getTool(ctx, 'project_register').execute({ title: 'Legacy A', id: 'legacy-a', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  const b = await getTool(ctx, 'project_register').execute({ title: 'Legacy B', id: 'legacy-b', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  assert.equal(a.projectId, 'legacy-a');
+  assert.equal(b.projectId, 'legacy-b');
+  assert.equal(b.entityConflict.conflict, false, 'legacy 各自 entity=自身,互不冲突');
+});
+
+test('project_advance:parked 激活时同 entity active 冲突 → 拒绝激活(不静默并行)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  // 既有 active 项目 entity=shared。
+  await getTool(ctx, 'project_register').execute({ title: 'Live', id: 'live', requirement: 'r', flowTemplate: 'mini-flow', entity: 'shared-entity' }, context);
+  // 同 entity 排队 parked(登记放行,回执携带冲突信号)。
+  const q = await getTool(ctx, 'project_register').execute({ title: 'Queued', id: 'queued', requirement: 'r', flowTemplate: 'mini-flow', entity: 'shared-entity', parked: true }, context);
+  assert.equal(q.state, 'parked');
+  assert.equal(q.entityConflict.conflict, true, '排队登记回执带冲突信号');
+  // 激活同 entity → 冲突拒绝。
+  await assert.rejects(
+    () => getTool(ctx, 'project_advance').execute({ projectId: 'queued', activate: true }, context),
+    /同 entity 互斥冲突/,
+    '激活应被明确拒绝',
+  );
+  const still = await readJson(registryPaths(workspace, 'queued').registryFile);
+  assert.equal(still.state, 'parked', '拒绝激活后仍停在 parked');
+});
+
+test('project_advance:parked 激活无冲突(不同 entity)→ 成功激活,回执 entityConflict.conflict=false', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'Live', id: 'live', requirement: 'r', flowTemplate: 'mini-flow', entity: 'ent-live' }, context);
+  const q = await getTool(ctx, 'project_register').execute({ title: 'Queued', id: 'queued', requirement: 'r', flowTemplate: 'mini-flow', entity: 'ent-queued', parked: true }, context);
+  assert.equal(q.state, 'parked');
+  const act = await getTool(ctx, 'project_advance').execute({ projectId: 'queued', activate: true }, context);
+  assert.equal(act.activated, true);
+  assert.equal(act.entityConflict.conflict, false, '不同 entity 激活放行');
+  const after = await readJson(registryPaths(workspace, 'queued').registryFile);
+  assert.equal(after.state, 'active');
 });
 
 // ── C3 schema 兼容:读旧 schemaVersion=1 登记簿不报错、写回不破坏 ──────────

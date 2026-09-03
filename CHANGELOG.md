@@ -2,6 +2,22 @@
 
 本 preset 的全部显著变更记录在此文件。
 
+## [0.13.0] - 2026-09-03
+
+entity 底座互斥显式化:隐式触点显式化(kr-entity-mutex 交付;背景:项目间并发靠触点声明互斥,但触点只覆盖显式文件路径;`.dsh-base/<entity>/` 是跨项目隐式共享写,同 entity 两个 active 项目并行迭代会竞争写同一底座)。
+
+- **entity 互斥检测纯函数(project-lib 只增不改,零 npm import)**:
+  - `entityTouchpoint(workspaceDir, entitySlug)` = baseDossierPaths(隐式触点路径,与「资源触点互斥声明」的显式文件路径同级)。
+  - `entityConflictActive(candidateEntity, registries)` = 同 entity active 互斥检测;`entitySlugOf` 缺省=registry.id(legacy 天然互异、不冲突,25 存量项目零影响)。
+- **project_register 登记时冲突检测**:对同 entity active 项目做互斥检测——命中且非 parked → **明确拒绝**(不静默并行),错误信息列出冲突项目与候选方案(等空出/parked 排队/project_block 排序);parked 登记 = 显式排队放行,回执带 `entityConflict` 冲突信号。不同 entity / legacy 放行(回归不变)。
+- **project_advance(activate:true) 激活时冲突检测**:parked→active 激活前对同 entity active 项目(排除自身)做互斥检测,命中 → **明确拒绝激活**,须待 entity 空出或经用户裁决后再激活;无冲突则正常激活,回执带 `entityConflict(conflict:false)`。
+- **REGISTER_OUTPUT_SCHEMA / ADVANCE_OUTPUT_SCHEMA** 增可选 `entityConflict`(实体形状 entityConflictSchema)。
+- **MANUAL_TEXT 增补**:「资源触点互斥声明(机制1)」补 entity 一等触点维度句;「暂存区 parked 语义(机制4)」补激活冲突检测句;工具速查/工具 description 同步。
+- 版本 0.12.0 → **0.13.0(minor)**:entity 触点显式化 + 冲突检测落地 = 能力新增。
+- 测试:project-lib 28→**34**(新增 entityTouchpoint 断言隐式触点==底座路径、entityConflictActive 同/异 entity/parked/legacy/非法输入 6 例);project-registry 67→**72**(新增 Register 冲突拒绝/不同 entity 放行/legacy 回归、Activate 冲突拒绝/无冲突激活 5 例)+ 既有同 entity 模板测试改为 parked 排队并断言冲突信号。preset 全量 154→**165** 例,lib+registry 106/106 绿;`verify-c4c` 通过;prompt-render AC7-①(manual section 注册)通过。
+- **AC5 真机验证(r4)**:真实 register/activate 双同 entity 项目端到端行为 = 用户侧 blocking 执行,流水线只做单测/静态核对。
+- 触点:presets/project-pipeline/(project-lib.mjs、project-registry.mjs、MANUAL_TEXT、test/)→ **r2 交付 deliverables/ + APPLY.md** + **r3 deploy 至 IN SYNC + 重启**(重启窗口并入攒批)。
+
 ## [0.12.0] - 2026-09-02
 
 成本计量 v2:统一 token 口径与模型来源(kr-cost-v2 交付;背景:预算账本 tokens(外层)与 uncachedInput+output(明细)双口径混用、projcache 无 model 字段、无单一权威总消耗公式)。

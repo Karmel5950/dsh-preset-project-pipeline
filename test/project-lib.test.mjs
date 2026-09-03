@@ -25,7 +25,9 @@ import {
   buildFailureReport,
   collectAllBlockers,
   compileReadingsHeader,
+  entityConflictActive,
   entitySlugOf,
+  entityTouchpoint,
   expandReadings,
   matchRuling,
   modelLabel,
@@ -415,6 +417,72 @@ test('baseDossierExists:以 STATE.md 存在为准', async (t) => {
   await mkdir(join(workspace, '.dsh-base', 'my-entity'), { recursive: true });
   await writeFile(join(workspace, '.dsh-base', 'my-entity', 'STATE.md'), '# 状态\n', 'utf8');
   assert.equal(await baseDossierExists(workspace, 'my-entity'), true, '有 STATE.md → true');
+});
+
+test('entityConflictActive:同 entity active 并行 → conflict=true(冲突信号,不静默)', () => {
+  const candidate = 'shared-entity';
+  const registries = [
+    { id: 'a', state: 'active', entitySlug: 'shared-entity' },
+    { id: 'b', state: 'active', entitySlug: 'other' },
+  ];
+  const out = entityConflictActive(candidate, registries);
+  assert.equal(out.conflict, true);
+  assert.equal(out.conflicts.length, 1);
+  assert.equal(out.conflicts[0].projectId, 'a');
+  assert.equal(out.conflicts[0].entitySlug, 'shared-entity');
+});
+
+test('entityConflictActive:不同 entity active → conflict=false(放行)', () => {
+  const registries = [
+    { id: 'a', state: 'active', entitySlug: 'ent-a' },
+    { id: 'b', state: 'active', entitySlug: 'ent-b' },
+  ];
+  assert.equal(entityConflictActive('ent-c', registries).conflict, false, '候选 entity 无冲突');
+  assert.deepEqual(entityConflictActive('ent-c', registries).conflicts, []);
+});
+
+test('entityConflictActive:parked→active 同 entity 冲突拒绝(parked 登记不构成冲突但激活会拦)', () => {
+  // 已有一个 active entity=shared-entity;候选要激活的 entity 相同 → 冲突。
+  const registries = [
+    { id: 'live', state: 'active', entitySlug: 'shared-entity' },
+    { id: 'queued', state: 'parked', entitySlug: 'shared-entity' },
+  ];
+  const out = entityConflictActive('shared-entity', registries);
+  assert.equal(out.conflict, true, 'queued(parked)激活会因 active 冲突被拦');
+  assert.equal(out.conflicts.length, 1);
+  assert.equal(out.conflicts[0].projectId, 'live');
+});
+
+test('entityConflictActive:legacy(无 entitySlug 缺省=自身)天然互异、不冲突(R3 回归)', () => {
+  const registries = [
+    { id: 'legacy-a', state: 'active' },
+    { id: 'legacy-b', state: 'active' },
+  ];
+  // 新登记候选 projectId 唯一(如 'legacy-c'),不会匹配任何 legacy 项目自身 id → 不冲突。
+  assert.equal(entityConflictActive('legacy-c', registries).conflict, false, '新 id 候选不冲突');
+  assert.deepEqual(entityConflictActive('legacy-c', registries).conflicts, []);
+  // 纯函数为比较语义:候选若与某 active 项目自身 id 相同(注册流程 id 唯一不会触发)则判冲突。
+  const self = entityConflictActive('legacy-a', registries);
+  assert.equal(self.conflict, true);
+  assert.equal(self.conflicts[0].projectId, 'legacy-a');
+});
+
+test('entityConflictActive:空/非法候选或注册表 → conflict=false(不炸)', () => {
+  assert.deepEqual(entityConflictActive('', [{ id: 'a', state: 'active', entitySlug: 'x' }]), { conflict: false, conflicts: [] });
+  assert.deepEqual(entityConflictActive(null, [{ id: 'a', state: 'active', entitySlug: 'x' }]), { conflict: false, conflicts: [] });
+  assert.deepEqual(entityConflictActive('x', null), { conflict: false, conflicts: [] });
+  assert.deepEqual(entityConflictActive('x', [null, 'str', { id: 'p', state: 'delivered', entitySlug: 'x' }]), { conflict: false, conflicts: [] }, '非 active 不冲突');
+});
+
+test('entityTouchpoint:隐式触点 == 底座路径(一等触点,与显式文件路径同级,R2)', () => {
+  const root = 'C:/dummy/ws';
+  const tp = entityTouchpoint(root, 'my-entity');
+  const base = baseDossierPaths(root, 'my-entity');
+  assert.equal(tp.baseDir, base.baseDir);
+  assert.equal(tp.stateFile, base.stateFile);
+  assert.ok(tp.baseDir.includes('.dsh-base'), '隐式触点在底座目录');
+  // 卫兵同 baseDossierPaths:非法 entitySlug 拒绝
+  assert.throws(() => entityTouchpoint(root, '../evil'), /entitySlug/);
 });
 
 test('validateReadings:只增校验(非空字符串数组;缺省通过)', () => {

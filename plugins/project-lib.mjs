@@ -39,6 +39,12 @@
 //   - normalizeUsage(任意旧/新形状→六桶+model+provider,兼容读)/ modelLabel(model,'unknown' 哨兵);
 //   - aggregateByModel(按 model 分组聚合,未知归 'unknown');
 //   - aggregateByRole 扩展:桶增 cacheRead/cacheWrite 与 model 溯源透传位(可选 modelProvenance carry-forward)。
+// 0.13.0 新增(entity 底座互斥显式化,隐式触点显式化,kr-entity-mutex,2026-09-03):
+//   - entityTouchpoint(workspaceDir, entitySlug):entity 隐式触点路径(= baseDossierPaths,
+//     与「资源触点互斥声明(机制1)」的显式文件路径同级),单测断言 隐式触点 == 底座路径;
+//   - entityConflictActive(candidateEntity, registries):同 entity active 互斥检测纯函数,
+//     entitySlugOf 缺省=registry.id(legacy 天然互异、不冲突,25 存量项目零影响);
+//     只增不改、零 npm import。
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
@@ -463,6 +469,51 @@ export async function baseDossierExists(workspaceDir, entitySlug) {
   } catch {
     return false;
   }
+}
+
+// ── entity 底座互斥显式化·隐式触点(0.13.0,kr-entity-mutex,2026-09-03)─────
+// 背景:.dsh-base/<entity>/ 是跨项目隐式共享写;同 entity 两个 active 项目并行迭代
+// 会竞争写同一底座。本需求把 entity 维度提升为一等资源触点(等价于自动声明「拟写
+// <workspace>/.dsh-base/<entity>/」),并提供同 entity active 互斥检测纯函数。只增不改。
+
+/**
+ * entity 隐式触点路径(只读,复用 baseDossierPaths 单一来源)。
+ * 返回 baseDossierPaths 的对象(baseDir 即「拟写 <workspace>/.dsh-base/<entitySlug>/」
+ * 的目录);用于把 entity 维度并入「资源触点互斥声明(机制1)」比对——单测断言
+ * 隐式触点 == 底座路径(R2)。
+ */
+export function entityTouchpoint(workspaceDir, entitySlug) {
+  return baseDossierPaths(workspaceDir, entitySlug);
+}
+
+/**
+ * 同 entity active 互斥检测(纯函数,零 npm import,只增不改)。
+ * 输入:candidateEntity(候选 entity slug,非空字符串);registries(项目 REGISTRY 数组,
+ * 每项须含 id/state/entitySlug;entitySlug 经 entitySlugOf 提取,缺省=registry.id)。
+ * 返回:{ conflict: boolean, conflicts: [{ projectId, entitySlug, state }] }。
+ * 规则:
+ *   - 仅对 state==='active' 的既有项目做互异冲突判定(同 entity 并行 active 才竞争写底座);
+ *   - legacy(无 entitySlug,缺省=项目自身 id)之间天然互异、永不冲突(R3 回归);
+ *   - parked/delivered/rejected 等非 active 不构成冲突(机制4:parked 进比对但标注不冲突);
+ *   - 候选 id 与自身相同但自身非 active 时(如 parked)同样不视为冲突。
+ * 只增不改:不改任何既有导出。
+ */
+export function entityConflictActive(candidateEntity, registries) {
+  if (typeof candidateEntity !== 'string' || candidateEntity.length === 0) {
+    return { conflict: false, conflicts: [] };
+  }
+  const list = Array.isArray(registries) ? registries : [];
+  const conflicts = [];
+  for (const r of list) {
+    if (r === null || typeof r !== 'object') continue;
+    if (r.state !== 'active') continue; // 仅 active 并行才竞争写底座
+    const slug = entitySlugOf(r);
+    if (!(typeof slug === 'string' && slug.length > 0)) continue;
+    if (slug === candidateEntity) {
+      conflicts.push({ projectId: r.id, entitySlug: slug, state: r.state });
+    }
+  }
+  return { conflict: conflicts.length > 0, conflicts };
 }
 
 /** readings 校验(只增):若出现必须是非空字符串数组,每项非空;缺省通过。 */
