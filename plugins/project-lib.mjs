@@ -2286,9 +2286,18 @@ export function validateAcceptanceRouting(entries) {
 // 计数口径=自最近一次沉淀登记以来 state=delivered 项目数,从 REGISTRY 派生不新增状态文件。
 // 开关:enabled=false 时触发检测代码层短路(不产生登记指令);计数在关闭期间继续累计
 // (从 REGISTRY 派生,不新增状态文件),重新开启后若 count>=N 下一次交付即触发。
+// 识别口径:沉淀项目按 flowRef 识别(flowRef 以 sediment-flow 开头,自动沉淀项目经
+// register 指定 flowTemplate=sediment-flow 即携带);title 前缀「沉淀」仅保留为登记惯例,
+// 不作为判定依据(真机探针教训:title 带「沉淀」的用户项目不得误判为沉淀项目)。
 // 全部纯函数、零 npm import、只增不改。
 
-/** 沉淀项目 title 前缀(锚点:从 REGISTRY 派生「最近一次沉淀项目登记」)。 */
+/**
+ * 沉淀项目 title 前缀(登记惯例,非判定依据)。
+ * 自动沉淀项目登记时 title 带「沉淀」前缀(惯例);但识别沉淀项目一律按 flowRef
+ * (flowRef 以 sediment-flow 开头),title 前缀不参与判定——任何用户项目标题以
+ * 「沉淀」开头都不会被误判为沉淀项目(真机探针教训:title「沉淀机制探针 1/2」曾
+ * 被误判为沉淀项目成为锚点导致计数归零永不触发)。
+ */
 export const SEDIMENT_TITLE_PREFIX = '沉淀';
 
 /** 默认沉淀阈值 N(纯函数回退;workspace 级可调,并入 audit-rules.json meta 段 sedimentation.everyNDelivered)。 */
@@ -2318,13 +2327,16 @@ export const SEDIMENT_FLOW_TEMPLATE = 'sediment-flow';
 export const SEDIMENT_TRIGGER_MESSAGE = '已达沉淀阈值 N,须登记沉淀项目';
 
 /**
- * 判断某项目是否为沉淀项目(以 title 带「沉淀」前缀为准,锚点从 REGISTRY 派生)。
- * 存量项目零影响:普通项目 title 不以「沉淀」开头,天然非沉淀项目。
+ * 判断某项目是否为沉淀项目(按 flowRef 识别:flowRef 以 sediment-flow 开头)。
+ * 自动沉淀项目经 register 指定 flowTemplate=sediment-flow 即携带 flowRef=sediment-flow@N,
+ * 故 flowRef 前缀即识别依据。title 前缀「沉淀」仅保留为登记惯例(SEDIMENT_TITLE_PREFIX),
+ * 不作为判定依据——用户手建「沉淀探针」类项目(title 带「沉淀」但 flowRef 非 sediment-flow)
+ * 计入普通交付,不被误判为沉淀项目(真机探针教训)。
  */
 export function isSedimentProject(registry) {
   return registry !== null && typeof registry === 'object'
-    && typeof registry.title === 'string'
-    && registry.title.startsWith(SEDIMENT_TITLE_PREFIX);
+    && typeof registry.flowRef === 'string'
+    && registry.flowRef.startsWith(SEDIMENT_FLOW_TEMPLATE);
 }
 
 /**

@@ -3,8 +3,8 @@
 批量沉淀机制:每 N 项交付触发专门沉淀流程(kr-sediment-batch 交付;背景:0.15.0 设计的「harvest 顺带跑一轮 project_audit」是 MANUAL_TEXT 纪律,连续四次 harvest 跳过,自主审计飞轮转不起来——AC5 见证(无人工输入的自主立项)始终无法发生。用户决策:放弃每次沉淀,改为批量触发)。
 
 - **计数触发(project-lib 只增不改,零 npm import)**:
-  - `SEDIMENT_TITLE_PREFIX`(「沉淀」,锚点从 REGISTRY 派生)/ `DEFAULT_SEDIMENT_THRESHOLD`(10)/ `SEDIMENT_FLOW_TEMPLATE`(sediment-flow)/ `SEDIMENT_TRIGGER_MESSAGE`(「已达沉淀阈值 N,须登记沉淀项目」)。
-  - `isSedimentProject`(title 带「沉淀」前缀)/ `lastSedimentRegistrationAt`(最近沉淀登记 createdAt 锚点)/ `countDeliveredSinceSediment`(自最近沉淀登记以来 delivered 数,从 REGISTRY 派生,沉淀自身不计)/ `hasActiveOrParkedSediment`(防重复触发)/ `sedimentThresholdMet`(满 N 触发/未满不触发/防重复/并发边界)。
+  - `SEDIMENT_TITLE_PREFIX`(「沉淀」,登记惯例,非判定依据)/ `DEFAULT_SEDIMENT_THRESHOLD`(10)/ `SEDIMENT_FLOW_TEMPLATE`(sediment-flow)/ `SEDIMENT_TRIGGER_MESSAGE`(「已达沉淀阈值 N,须登记沉淀项目」)。
+  - `isSedimentProject`(**按 flowRef 识别**:flowRef 以 sediment-flow 开头即沉淀项目;title 前缀「沉淀」不作为判定依据——真机探针教训:title「沉淀机制探针 1/2」曾按 title 前缀被误判为沉淀项目成为锚点导致计数归零永不触发)/ `lastSedimentRegistrationAt`(最近沉淀登记 createdAt 锚点,同 flowRef 口径)/ `countDeliveredSinceSediment`(自最近沉淀登记以来 delivered 数,从 REGISTRY 派生,沉淀自身不计)/ `hasActiveOrParkedSediment`(防重复触发)/ `sedimentThresholdMet`(满 N 触发/未满不触发/防重复/并发边界)。
   - `DEFAULT_AUDIT_META` 增 `sedimentation:{enabled:true, everyNDelivered:10}`;`validateAuditRules` 校验 meta.sedimentation 形状(enabled 布尔 + everyNDelivered 正整数);`normalizeSedimentation` 归一化(缺省/非法回退默认)。
 - **advance-to-delivered 触发指令(project-registry)**:结项时实时读 audit-rules.json meta 段 sedimentation(免部署生效,AC3),扫全部 REGISTRY 调 `sedimentThresholdMet`;触发 → 返回值携带 `sediment:{triggered:true,enabled,count,threshold,message}`(代码层浮现,非 MANUAL_TEXT)。**开关**:enabled=false → 代码层短路不产生登记指令(计数继续累计,从 REGISTRY 派生,重新开启后 count>=N 下一次交付即触发)。防重复触发(active/parked 已有沉淀项目不重登)+ 并发只触发一次(登记沉淀项目后后续 advance 不再触发)。读容错(registry-halfwrite-read-tolerance):触发检测失败非致命,不阻断结项。
 - **ADVANCE_OUTPUT_SCHEMA 增可选 `sediment`**(sedimentTriggerSchema);render 结项分支增触发指令提示。

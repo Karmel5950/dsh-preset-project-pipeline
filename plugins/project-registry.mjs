@@ -2300,7 +2300,8 @@ SPEC(clarify 阶段)必须含「可行性分析」章,五维逐条给结论(可�
 - **开关(0.18.0 增补)**:audit-rules.json meta 段 sedimentation:{enabled:true, everyNDelivered:10}(默认值);enabled=false → 触发检测代码层短路,不产生登记指令;计数在关闭期间继续累计(从 REGISTRY 派生,不新增状态文件),重新开启后若 count>=N 下一次交付即触发。改配免部署生效。
 - **触发信号代码层浮现**:advance-to-delivered 返回值携带「已达沉淀阈值 N,须登记沉淀项目」指令(sediment.triggered=true,非 MANUAL_TEXT 手册纪律);第 N 个项目的协调者收到指令后登记沉淀项目(复用既有 advance 链路,不新增常驻进程)。
 - **防重复触发**:active/parked 已有沉淀项目不重登;并发交付只触发一次(登记沉淀项目后,后续 advance 因已有 active/parked 沉淀项目不再触发)。
-- **计数口径**:自最近一次沉淀项目登记(title 带「沉淀」前缀)以来 state=delivered 的项目数,从 REGISTRY 派生,不新增状态文件。
+- **计数口径**:自最近一次沉淀项目登记以来 state=delivered 的项目数,从 REGISTRY 派生,不新增状态文件。
+- **沉淀项目识别口径(0.18.0 修订)**:按 **flowRef** 识别——flowRef 以 sediment-flow 开头即沉淀项目(自动沉淀项目经 register 指定 flowTemplate=sediment-flow 即携带 flowRef=sediment-flow@N);title 前缀「沉淀」仅保留为登记惯例,不作为判定依据。任何用户项目标题以「沉淀」开头(如「沉淀机制探针」)都不会被误判为沉淀项目、不构成锚点、计入普通交付(真机探针教训)。
 - **沉淀流程模板**:sediment-flow(复用 lite-flow 结构 + 沉淀职责 note,避免 flow schema 变更);沉淀职责=跑 project_audit 审计轮、失败模式聚合、按 harvest-merge/lesson-lifecycle 纪律整固 lesson 库、回顾审计规则与消费路由、落库+留痕。
 
 ### 阶段类型四词表

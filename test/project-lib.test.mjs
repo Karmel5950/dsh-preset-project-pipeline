@@ -854,9 +854,9 @@ test('validateAcceptanceRouting:无 trigger(模型可验证)route 可为 model-v
 
 // ── 批量沉淀机制(0.18.0,kr-sediment-batch):阈值检测纯函数 ──
 
-/** 构造 REGISTRY 桩(供沉淀纯函数测试)。 */
-function mkReg(id, state, title, createdAt, updatedAt) {
-  return { id, state, title, createdAt, updatedAt };
+/** 构造 REGISTRY 桩(供沉淀纯函数测试;flowRef 可选,沉淀项目须带 sediment-flow@N)。 */
+function mkReg(id, state, title, createdAt, updatedAt, flowRef) {
+  return { id, state, title, createdAt, updatedAt, flowRef };
 }
 
 test('常量钉死:SEDIMENT_TITLE_PREFIX / DEFAULT_SEDIMENT_THRESHOLD / SEDIMENT_FLOW_TEMPLATE / SEDIMENT_TRIGGER_MESSAGE / DEFAULT_SEDIMENTATION', () => {
@@ -877,34 +877,44 @@ test('normalizeSedimentation:缺省/非法字段回退默认;合法原样(开关
   assert.deepEqual(normalizeSedimentation({ everyNDelivered: 3 }), { enabled: true, everyNDelivered: 3 }, '缺 enabled 回退默认 true');
 });
 
-test('isSedimentProject:title 带「沉淀」前缀 → true;普通项目/非对象 → false(存量零影响)', () => {
-  assert.equal(isSedimentProject({ title: '沉淀:批量沉淀' }), true);
-  assert.equal(isSedimentProject({ title: '沉淀项目' }), true);
-  assert.equal(isSedimentProject({ title: '普通项目' }), false, '普通项目非沉淀');
+test('isSedimentProject:按 flowRef 识别(flowRef 以 sediment-flow 开头);title 前缀不作为判定依据(C1)', () => {
+  // ① flowRef=sediment-flow@1 → 识别为沉淀(C2 例一)。
+  assert.equal(isSedimentProject({ title: '批量沉淀机制', flowRef: 'sediment-flow@1' }), true, 'flowRef=sediment-flow@1 识别为沉淀');
+  assert.equal(isSedimentProject({ title: '沉淀:批量沉淀', flowRef: 'sediment-flow@2' }), true, 'flowRef=sediment-flow@2 识别为沉淀');
+  // ② title 带「沉淀」但 flowRef=lite-flow@1(用户手建沉淀探针类)→ 计入普通交付(C2 例二)。
+  assert.equal(isSedimentProject({ title: '沉淀机制探针 1', flowRef: 'lite-flow@1' }), false, 'title 带沉淀但 flowRef=lite-flow → 非沉淀');
+  assert.equal(isSedimentProject({ title: '沉淀项目', flowRef: 'standard-flow@1' }), false, 'title 带沉淀但 flowRef 非 sediment-flow → 非沉淀');
+  // ③ id 含 "sediment" 但 title/flowRef 均非沉淀 → 不影响锚点(C2 例三)。
+  assert.equal(isSedimentProject({ id: 'sediment-probe', title: '探针', flowRef: 'lite-flow@1' }), false, 'id 含 sediment 但 title/flowRef 均非沉淀 → 非沉淀');
+  // 普通项目/非对象 → false(存量零影响)。
+  assert.equal(isSedimentProject({ title: '普通项目', flowRef: 'lite-flow@1' }), false, '普通项目非沉淀');
   assert.equal(isSedimentProject({ title: '' }), false);
   assert.equal(isSedimentProject(null), false);
   assert.equal(isSedimentProject({}), false);
+  assert.equal(isSedimentProject({ title: '沉淀项目' }), false, '无 flowRef 字段 → 非沉淀(仅 title 前缀不判定)');
 });
 
-test('lastSedimentRegistrationAt:取最近沉淀项目 createdAt;无沉淀 → null', () => {
+test('lastSedimentRegistrationAt:取最近沉淀项目 createdAt(按 flowRef 识别);无沉淀 → null', () => {
   const registries = [
-    mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z'),
-    mkReg('sed-1', 'active', '沉淀:批量沉淀', '2026-09-01T03:00:00.000Z', '2026-09-01T03:00:00.000Z'),
-    mkReg('sed-2', 'delivered', '沉淀:批量沉淀2', '2026-09-02T00:00:00.000Z', '2026-09-02T01:00:00.000Z'),
+    mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z', 'lite-flow@1'),
+    mkReg('sed-1', 'active', '沉淀:批量沉淀', '2026-09-01T03:00:00.000Z', '2026-09-01T03:00:00.000Z', 'sediment-flow@1'),
+    mkReg('sed-2', 'delivered', '沉淀:批量沉淀2', '2026-09-02T00:00:00.000Z', '2026-09-02T01:00:00.000Z', 'sediment-flow@1'),
   ];
   assert.equal(lastSedimentRegistrationAt(registries), '2026-09-02T00:00:00.000Z', '取最近沉淀项目 createdAt');
-  assert.equal(lastSedimentRegistrationAt([mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z')]), null, '无沉淀 → null');
+  assert.equal(lastSedimentRegistrationAt([mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z', 'lite-flow@1')]), null, '无沉淀 → null');
   assert.equal(lastSedimentRegistrationAt([]), null);
   assert.equal(lastSedimentRegistrationAt(null), null);
+  // title 带「沉淀」但 flowRef 非 sediment-flow → 不构成锚点(C2 例二/例三)。
+  assert.equal(lastSedimentRegistrationAt([mkReg('probe', 'delivered', '沉淀机制探针 1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z', 'lite-flow@1')]), null, 'title 带沉淀但 flowRef=lite-flow 不构成锚点');
 });
 
 test('countDeliveredSinceSediment:自最近沉淀登记以来 delivered 数(从 REGISTRY 派生,沉淀自身不计)', () => {
   const registries = [
-    mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z'),
-    mkReg('p2', 'delivered', 'P2', '2026-09-01T00:00:00.000Z', '2026-09-01T02:00:00.000Z'),
-    mkReg('sed-1', 'delivered', '沉淀:批量沉淀', '2026-09-01T03:00:00.000Z', '2026-09-01T04:00:00.000Z'),
-    mkReg('p3', 'delivered', 'P3', '2026-09-01T00:00:00.000Z', '2026-09-01T05:00:00.000Z'),
-    mkReg('p4', 'active', 'P4', '2026-09-01T00:00:00.000Z', '2026-09-01T06:00:00.000Z'),
+    mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z', 'lite-flow@1'),
+    mkReg('p2', 'delivered', 'P2', '2026-09-01T00:00:00.000Z', '2026-09-01T02:00:00.000Z', 'lite-flow@1'),
+    mkReg('sed-1', 'delivered', '沉淀:批量沉淀', '2026-09-01T03:00:00.000Z', '2026-09-01T04:00:00.000Z', 'sediment-flow@1'),
+    mkReg('p3', 'delivered', 'P3', '2026-09-01T00:00:00.000Z', '2026-09-01T05:00:00.000Z', 'lite-flow@1'),
+    mkReg('p4', 'active', 'P4', '2026-09-01T00:00:00.000Z', '2026-09-01T06:00:00.000Z', 'lite-flow@1'),
   ];
   // 锚点 = sed-1 createdAt(03:00);delivered 且 updatedAt>锚点 → p3(05:00) 计 1。
   // sed-1 自身(沉淀)不计入普通交付;active 的 p4 不计。
@@ -914,14 +924,18 @@ test('countDeliveredSinceSediment:自最近沉淀登记以来 delivered 数(从 
   // 空/坏条目跳过(registry-halfwrite-read-tolerance)。
   assert.equal(countDeliveredSinceSediment([]), 0);
   assert.equal(countDeliveredSinceSediment([null, 'x', { state: 'delivered' }]), 0);
+  // title 带「沉淀」但 flowRef=lite-flow 的用户探针 → 计入普通交付,不构成锚点(C2 例二)。
+  const probe = mkReg('probe', 'delivered', '沉淀机制探针 1', '2026-09-01T00:00:00.000Z', '2026-09-01T07:00:00.000Z', 'lite-flow@1');
+  assert.equal(countDeliveredSinceSediment([probe]), 1, 'title 带沉淀但 flowRef=lite-flow 计入普通交付');
 });
 
 test('hasActiveOrParkedSediment:active/parked 沉淀项目存在 → true;delivered/rejected/普通 → false', () => {
-  assert.equal(hasActiveOrParkedSediment([mkReg('s', 'active', '沉淀:x', 't', 't')]), true);
-  assert.equal(hasActiveOrParkedSediment([mkReg('s', 'parked', '沉淀:x', 't', 't')]), true);
-  assert.equal(hasActiveOrParkedSediment([mkReg('s', 'delivered', '沉淀:x', 't', 't')]), false, 'delivered 沉淀不构成防重复');
-  assert.equal(hasActiveOrParkedSediment([mkReg('s', 'rejected', '沉淀:x', 't', 't')]), false, 'rejected 沉淀不构成防重复');
-  assert.equal(hasActiveOrParkedSediment([mkReg('p', 'active', '普通', 't', 't')]), false, '普通项目非沉淀');
+  assert.equal(hasActiveOrParkedSediment([mkReg('s', 'active', '沉淀:x', 't', 't', 'sediment-flow@1')]), true);
+  assert.equal(hasActiveOrParkedSediment([mkReg('s', 'parked', '沉淀:x', 't', 't', 'sediment-flow@1')]), true);
+  assert.equal(hasActiveOrParkedSediment([mkReg('s', 'delivered', '沉淀:x', 't', 't', 'sediment-flow@1')]), false, 'delivered 沉淀不构成防重复');
+  assert.equal(hasActiveOrParkedSediment([mkReg('s', 'rejected', '沉淀:x', 't', 't', 'sediment-flow@1')]), false, 'rejected 沉淀不构成防重复');
+  assert.equal(hasActiveOrParkedSediment([mkReg('p', 'active', '普通', 't', 't', 'lite-flow@1')]), false, '普通项目非沉淀');
+  assert.equal(hasActiveOrParkedSediment([mkReg('p', 'active', '沉淀探针', 't', 't', 'lite-flow@1')]), false, 'title 带沉淀但 flowRef=lite-flow 非沉淀');
   assert.equal(hasActiveOrParkedSediment([]), false);
 });
 
@@ -951,29 +965,32 @@ test('sedimentThresholdMet:未满 N 不触发', () => {
 
 test('sedimentThresholdMet:防重复触发——已有 active/parked 沉淀项目不重登(AC1)', () => {
   const registries = [
-    mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z'),
-    mkReg('p2', 'delivered', 'P2', '2026-09-01T00:00:00.000Z', '2026-09-01T02:00:00.000Z'),
-    mkReg('p3', 'delivered', 'P3', '2026-09-01T00:00:00.000Z', '2026-09-01T03:00:00.000Z'),
-    mkReg('sed-1', 'active', '沉淀:批量沉淀', '2026-09-01T04:00:00.000Z', '2026-09-01T04:00:00.000Z'),
+    mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z', 'lite-flow@1'),
+    mkReg('p2', 'delivered', 'P2', '2026-09-01T00:00:00.000Z', '2026-09-01T02:00:00.000Z', 'lite-flow@1'),
+    mkReg('p3', 'delivered', 'P3', '2026-09-01T00:00:00.000Z', '2026-09-01T03:00:00.000Z', 'lite-flow@1'),
+    mkReg('sed-1', 'active', '沉淀:批量沉淀', '2026-09-01T04:00:00.000Z', '2026-09-01T04:00:00.000Z', 'sediment-flow@1'),
   ];
   const check = sedimentThresholdMet(registries, 3);
   assert.equal(check.triggered, false, '已有 active 沉淀项目 → 不触发');
   assert.match(check.reason, /防重复触发/);
   // parked 沉淀同样防重复。
-  const parked = sedimentThresholdMet([...registries.slice(0, 3), mkReg('sed-1', 'parked', '沉淀:x', 't', 't')], 3);
+  const parked = sedimentThresholdMet([...registries.slice(0, 3), mkReg('sed-1', 'parked', '沉淀:x', 't', 't', 'sediment-flow@1')], 3);
   assert.equal(parked.triggered, false, '已有 parked 沉淀项目 → 不触发');
+  // title 带「沉淀」但 flowRef=lite-flow 的用户探针不构成防重复(C2 例二)。
+  const probe = sedimentThresholdMet([...registries.slice(0, 3), mkReg('probe', 'active', '沉淀机制探针 1', 't', 't', 'lite-flow@1')], 3);
+  assert.equal(probe.triggered, true, 'title 带沉淀但 flowRef=lite-flow 不构成防重复,满 N 仍触发');
 });
 
 test('sedimentThresholdMet:并发边界——登记沉淀项目后不再触发(只触发一次,AC1)', () => {
   const registries = [
-    mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z'),
-    mkReg('p2', 'delivered', 'P2', '2026-09-01T00:00:00.000Z', '2026-09-01T02:00:00.000Z'),
-    mkReg('p3', 'delivered', 'P3', '2026-09-01T00:00:00.000Z', '2026-09-01T03:00:00.000Z'),
+    mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z', 'lite-flow@1'),
+    mkReg('p2', 'delivered', 'P2', '2026-09-01T00:00:00.000Z', '2026-09-01T02:00:00.000Z', 'lite-flow@1'),
+    mkReg('p3', 'delivered', 'P3', '2026-09-01T00:00:00.000Z', '2026-09-01T03:00:00.000Z', 'lite-flow@1'),
   ];
   // 无沉淀 → 满 3 触发。
   assert.equal(sedimentThresholdMet(registries, 3).triggered, true);
   // 登记 active 沉淀项目后(锚点=沉淀 createdAt)→ 不再触发(并发只触发一次)。
-  const withSediment = [...registries, mkReg('sed-1', 'active', '沉淀:批量沉淀', '2026-09-01T04:00:00.000Z', '2026-09-01T04:00:00.000Z')];
+  const withSediment = [...registries, mkReg('sed-1', 'active', '沉淀:批量沉淀', '2026-09-01T04:00:00.000Z', '2026-09-01T04:00:00.000Z', 'sediment-flow@1')];
   const check = sedimentThresholdMet(withSediment, 3);
   assert.equal(check.triggered, false, '登记沉淀项目后不再触发');
   assert.equal(check.count, 0, '锚点重置:沉淀登记后无新 delivered');

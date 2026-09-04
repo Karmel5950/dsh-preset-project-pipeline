@@ -2041,6 +2041,7 @@ test('advance-to-delivered:未满 N 不触发(AC1)', async (t) => {
 test('advance-to-delivered:已有 active/parked 沉淀项目 → 不触发(防重复,AC1)', async (t) => {
   const workspace = await makeWorkspace(t);
   await writeTemplate(workspace, 'mini-flow');
+  await writeTemplate(workspace, 'sediment-flow');
   await writeAuditRules(workspace, { sedimentation: { enabled: true, everyNDelivered: 2 } });
   const ctx = await mountPlugin();
   const context = sessionContext(workspace);
@@ -2048,8 +2049,8 @@ test('advance-to-delivered:已有 active/parked 沉淀项目 → 不触发(防�
   await deliverMini(t, ctx, workspace, 'P1');
   const { result } = await deliverMini(t, ctx, workspace, 'P2');
   assert.equal(result.sediment.triggered, true, '满 2 触发');
-  // 登记一个 active 沉淀项目(title 带「沉淀」前缀)。
-  await getTool(ctx, 'project_register').execute({ title: '沉淀:批量沉淀', id: 'sediment-1', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  // 登记一个 active 沉淀项目(flowTemplate=sediment-flow → flowRef=sediment-flow@1,按 flowRef 识别)。
+  await getTool(ctx, 'project_register').execute({ title: '沉淀:批量沉淀', id: 'sediment-1', requirement: 'r', flowTemplate: 'sediment-flow' }, context);
   // 再交付一个 → 不触发(已有 active 沉淀项目)。
   const { result: r3 } = await deliverMini(t, ctx, workspace, 'P3');
   assert.equal(r3.sediment.triggered, false, '已有 active 沉淀项目 → 不触发');
