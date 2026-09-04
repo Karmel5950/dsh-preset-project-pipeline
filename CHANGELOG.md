@@ -1,3 +1,20 @@
+## [0.18.0] - 2026-09-04
+
+批量沉淀机制:每 N 项交付触发专门沉淀流程(kr-sediment-batch 交付;背景:0.15.0 设计的「harvest 顺带跑一轮 project_audit」是 MANUAL_TEXT 纪律,连续四次 harvest 跳过,自主审计飞轮转不起来——AC5 见证(无人工输入的自主立项)始终无法发生。用户决策:放弃每次沉淀,改为批量触发)。
+
+- **计数触发(project-lib 只增不改,零 npm import)**:
+  - `SEDIMENT_TITLE_PREFIX`(「沉淀」,锚点从 REGISTRY 派生)/ `DEFAULT_SEDIMENT_THRESHOLD`(10)/ `SEDIMENT_FLOW_TEMPLATE`(sediment-flow)/ `SEDIMENT_TRIGGER_MESSAGE`(「已达沉淀阈值 N,须登记沉淀项目」)。
+  - `isSedimentProject`(title 带「沉淀」前缀)/ `lastSedimentRegistrationAt`(最近沉淀登记 createdAt 锚点)/ `countDeliveredSinceSediment`(自最近沉淀登记以来 delivered 数,从 REGISTRY 派生,沉淀自身不计)/ `hasActiveOrParkedSediment`(防重复触发)/ `sedimentThresholdMet`(满 N 触发/未满不触发/防重复/并发边界)。
+  - `DEFAULT_AUDIT_META` 增 `sedimentation:{enabled:true, everyNDelivered:10}`;`validateAuditRules` 校验 meta.sedimentation 形状(enabled 布尔 + everyNDelivered 正整数);`normalizeSedimentation` 归一化(缺省/非法回退默认)。
+- **advance-to-delivered 触发指令(project-registry)**:结项时实时读 audit-rules.json meta 段 sedimentation(免部署生效,AC3),扫全部 REGISTRY 调 `sedimentThresholdMet`;触发 → 返回值携带 `sediment:{triggered:true,enabled,count,threshold,message}`(代码层浮现,非 MANUAL_TEXT)。**开关**:enabled=false → 代码层短路不产生登记指令(计数继续累计,从 REGISTRY 派生,重新开启后 count>=N 下一次交付即触发)。防重复触发(active/parked 已有沉淀项目不重登)+ 并发只触发一次(登记沉淀项目后后续 advance 不再触发)。读容错(registry-halfwrite-read-tolerance):触发检测失败非致命,不阻断结项。
+- **ADVANCE_OUTPUT_SCHEMA 增可选 `sediment`**(sedimentTriggerSchema);render 结项分支增触发指令提示。
+- **flows/sediment-flow.json**:沉淀流程模板(复用 lite-flow 结构 + 沉淀职责 note,避免 flow schema 变更);沉淀职责=跑 project_audit 审计轮、失败模式聚合、按 harvest-merge/lesson-lifecycle 纪律整固 lesson 库、回顾审计规则与消费路由、落库+留痕。
+- **MANUAL_TEXT 增「批量沉淀机制」小节** + 工具速查/工具 description 补触发句(文本不含 {{template}} 变量,prompt-render-template-var-guard)。
+- 版本 0.17.1 → **0.18.0(minor)**:批量沉淀触发机制 = 能力新增。
+- 测试:project-lib 增沉淀纯函数单测(常量钉死/isSedimentProject/lastSedimentRegistrationAt/countDeliveredSinceSediment/hasActiveOrParkedSediment/sedimentThresholdMet 满 N happy path/未满/防重复/并发边界/阈值回退);project-registry 增 advance-to-delivered 触发单测(满 N happy path/未满/防重复/audit-rules 缺失回退默认/非结项不携带/MANUAL_TEXT 断言);prompt-render 增 MANUAL_TEXT 含「批量沉淀机制」断言。覆盖仓库全部相关测试文件(selftest-must-cover-repo-test-files),新增逻辑分支均有 happy path 测试(test-coverage-happy-path)。
+- **AC2 真机 + AC5 见证(r4)**:交付满 N 个后沉淀项目自动登记并跑完整流程、审计轮产出留痕,由用户侧 blocking 执行(用户侧按 FORM §7);流水线只做单测/桩预演核对。
+- 触点:presets/project-pipeline/(project-lib.mjs、project-registry.mjs、flows/sediment-flow.json、test/、package.json)→ **r2 交付 deliverables/ + APPLY.md** + **r3 deploy 至 IN SYNC + 重启**(重启窗口并入攒批)。
+
 ## [0.17.1] - 2026-09-04
 
 ### Fixed

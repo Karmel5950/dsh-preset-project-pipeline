@@ -1204,11 +1204,12 @@ export const F4_OBJECTS = new Set(['preset-source', 'host-plugin', 'prod-config'
 /** watcher 日志文件名(DEFAULT_LOG 单一事实源,观察 O1 经 plugindevRoot 推导候选)。 */
 export const DEFAULT_WATCH_LOG = 'pipeline-watch.log';
 
-/** audit-rules 默认 meta(规则表缺 meta 段时回退)。 */
+/** audit-rules 默认 meta(规则表缺 meta 段时回退)。0.18.0 增 sedimentation(批量沉淀开关+阈值)。 */
 export const DEFAULT_AUDIT_META = {
   metaRuleChangeCooldownDays: 30,
   maxAutoProjectsPerAudit: 2,
   lastMetaActionAt: null,
+  sedimentation: { enabled: true, everyNDelivered: 10 },
 };
 
 /** 观察原语集合(规则表 observe 合法取值)。 */
@@ -1325,6 +1326,14 @@ export function validateAuditRules(value) {
   }
   if (meta.lastMetaActionAt !== undefined && meta.lastMetaActionAt !== null && !nonEmptyString(meta.lastMetaActionAt)) {
     return bad('meta.lastMetaActionAt 必须是 ISO 时间戳字符串或 null');
+  }
+  if (meta.sedimentation !== undefined) {
+    const s = meta.sedimentation;
+    if (!isPlainObject(s)) return bad('meta.sedimentation 必须是对象');
+    if (s.enabled !== undefined && typeof s.enabled !== 'boolean') return bad('meta.sedimentation.enabled 必须是布尔值');
+    if (s.everyNDelivered !== undefined && (!Number.isSafeInteger(s.everyNDelivered) || s.everyNDelivered < 1)) {
+      return bad('meta.sedimentation.everyNDelivered 必须是正整数(批量沉淀阈值 N)');
+    }
   }
   if (!Array.isArray(value.rules) || value.rules.length === 0) return bad('audit-rules.rules 必须是非空数组');
   const seen = new Set();
@@ -2267,4 +2276,118 @@ export function validateAcceptanceRouting(entries) {
     }
   }
   return errors.length === 0 ? { ok: true, errors: [] } : { ok: false, errors };
+}
+
+// ── 批量沉淀机制(kr-sediment-batch,0.18.0,2026-09-04)──────────────────────
+// 计数触发:每 N 个项目交付(N 默认 10,workspace 级可调,并入 audit-rules.json meta 段
+// sedimentation:{enabled,everyNDelivered},免部署生效)自动登记一个专门沉淀项目。
+// 触发信号代码层浮现(advance-to-delivered 返回值携带「已达沉淀阈值 N,须登记沉淀项目」
+// 指令,非 MANUAL_TEXT)。防重复触发(active/parked 已有沉淀项目不重登、并发只触发一次);
+// 计数口径=自最近一次沉淀登记以来 state=delivered 项目数,从 REGISTRY 派生不新增状态文件。
+// 开关:enabled=false 时触发检测代码层短路(不产生登记指令);计数在关闭期间继续累计
+// (从 REGISTRY 派生,不新增状态文件),重新开启后若 count>=N 下一次交付即触发。
+// 全部纯函数、零 npm import、只增不改。
+
+/** 沉淀项目 title 前缀(锚点:从 REGISTRY 派生「最近一次沉淀项目登记」)。 */
+export const SEDIMENT_TITLE_PREFIX = '沉淀';
+
+/** 默认沉淀阈值 N(纯函数回退;workspace 级可调,并入 audit-rules.json meta 段 sedimentation.everyNDelivered)。 */
+export const DEFAULT_SEDIMENT_THRESHOLD = 10;
+
+/** 默认沉淀开关配置(meta 段 sedimentation 缺省回退)。 */
+export const DEFAULT_SEDIMENTATION = { enabled: true, everyNDelivered: 10 };
+
+/**
+ * 归一化沉淀开关配置(纯函数):缺省/非法字段回退默认。
+ * 输入 value(meta.sedimentation 或任意形状)→ { enabled, everyNDelivered }。
+ */
+export function normalizeSedimentation(value) {
+  if (value === null || typeof value !== 'object') return { ...DEFAULT_SEDIMENTATION };
+  return {
+    enabled: typeof value.enabled === 'boolean' ? value.enabled : DEFAULT_SEDIMENTATION.enabled,
+    everyNDelivered: Number.isSafeInteger(value.everyNDelivered) && value.everyNDelivered > 0
+      ? value.everyNDelivered
+      : DEFAULT_SEDIMENTATION.everyNDelivered,
+  };
+}
+
+/** 沉淀项目流程模板 id(复用 lite-flow 结构 + 沉淀职责 note,避免 flow schema 变更)。 */
+export const SEDIMENT_FLOW_TEMPLATE = 'sediment-flow';
+
+/** 沉淀触发指令文本(advance-to-delivered 返回值携带,代码层浮现)。 */
+export const SEDIMENT_TRIGGER_MESSAGE = '已达沉淀阈值 N,须登记沉淀项目';
+
+/**
+ * 判断某项目是否为沉淀项目(以 title 带「沉淀」前缀为准,锚点从 REGISTRY 派生)。
+ * 存量项目零影响:普通项目 title 不以「沉淀」开头,天然非沉淀项目。
+ */
+export function isSedimentProject(registry) {
+  return registry !== null && typeof registry === 'object'
+    && typeof registry.title === 'string'
+    && registry.title.startsWith(SEDIMENT_TITLE_PREFIX);
+}
+
+/**
+ * 从 REGISTRY 派生「最近一次沉淀项目登记」的锚点时间(createdAt,ISO 串)。
+ * 无沉淀项目 → null(计数从最早 delivered 起计,即全部 delivered 数)。
+ */
+export function lastSedimentRegistrationAt(registries) {
+  const list = Array.isArray(registries) ? registries : [];
+  let latest = null;
+  for (const r of list) {
+    if (!isSedimentProject(r)) continue;
+    const at = r?.createdAt;
+    if (typeof at !== 'string' || at.length === 0) continue;
+    if (latest === null || at > latest) latest = at;
+  }
+  return latest;
+}
+
+/**
+ * 计数口径:自最近一次沉淀项目登记以来 state=delivered 的项目数(从 REGISTRY 派生)。
+ * 以 delivered 项目的 updatedAt(交付时间)与锚点比较;沉淀项目自身不计入普通交付;
+ * 无锚点 → 全部 delivered 数。registry-halfwrite-read-tolerance:坏条目跳过(不炸)。
+ */
+export function countDeliveredSinceSediment(registries) {
+  const list = Array.isArray(registries) ? registries : [];
+  const anchor = lastSedimentRegistrationAt(list);
+  let count = 0;
+  for (const r of list) {
+    if (r === null || typeof r !== 'object') continue;
+    if (isSedimentProject(r)) continue; // 沉淀项目自身不计入普通交付
+    if (r.state !== 'delivered') continue;
+    const at = r?.updatedAt ?? r?.createdAt;
+    if (typeof at !== 'string' || at.length === 0) continue;
+    if (anchor === null || at > anchor) count += 1;
+  }
+  return count;
+}
+
+/**
+ * 是否存在 active/parked 的沉淀项目(防重复触发 + 并发只触发一次)。
+ */
+export function hasActiveOrParkedSediment(registries) {
+  const list = Array.isArray(registries) ? registries : [];
+  return list.some((r) => isSedimentProject(r) && (r.state === 'active' || r.state === 'parked'));
+}
+
+/**
+ * 阈值检测纯函数(AC1):满 N 触发 / 未满不触发 / 防重复触发 / 并发边界。
+ * 输入:registries(全部项目 REGISTRY 数组)、threshold(N,默认 DEFAULT_SEDIMENT_THRESHOLD)。
+ * 返回 { triggered, count, threshold, reason? }:
+ *   triggered=true 当且仅当 count >= threshold 且无 active/parked 沉淀项目。
+ * 并发边界:本函数是纯函数;「并发只触发一次」由调用方(advance-to-delivered)在登记
+ * 沉淀项目后,后续 advance 因 hasActiveOrParkedSediment=true 而不再触发(单进程内
+ * advance 串行执行,天然串行化)。
+ */
+export function sedimentThresholdMet(registries, threshold) {
+  const N = Number.isSafeInteger(threshold) && threshold > 0 ? threshold : DEFAULT_SEDIMENT_THRESHOLD;
+  const count = countDeliveredSinceSediment(registries);
+  if (hasActiveOrParkedSediment(registries)) {
+    return { triggered: false, count, threshold: N, reason: '已有 active/parked 沉淀项目,防重复触发' };
+  }
+  if (count >= N) {
+    return { triggered: true, count, threshold: N };
+  }
+  return { triggered: false, count, threshold: N };
 }

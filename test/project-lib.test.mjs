@@ -60,6 +60,17 @@ import {
   ACCEPTANCE_TRIGGER_CLASSES,
   parseAcceptanceRouting,
   validateAcceptanceRouting,
+  DEFAULT_SEDIMENT_THRESHOLD,
+  DEFAULT_SEDIMENTATION,
+  SEDIMENT_FLOW_TEMPLATE,
+  SEDIMENT_TITLE_PREFIX,
+  SEDIMENT_TRIGGER_MESSAGE,
+  countDeliveredSinceSediment,
+  hasActiveOrParkedSediment,
+  isSedimentProject,
+  lastSedimentRegistrationAt,
+  normalizeSedimentation,
+  sedimentThresholdMet,
 } from '../plugins/project-lib.mjs';
 
 // ── 桩具 ────────────────────────────────────────────────────────────────────
@@ -407,8 +418,8 @@ test('aggregateByRole:空/非法输入 → 空对象', () => {
 
 // ── 0.10.0 实体仓底座 + role readings(P1)────────────────────────────────
 
-test('MAX_COMPILED_PERSONA = 1000(C4a:头+正文合计)', () => {
-  assert.equal(MAX_COMPILED_PERSONA, 1000);
+test('MAX_COMPILED_PERSONA = 1060(C4a:头+正文合计;0.17.1 由 1000 抬至 1060)', () => {
+  assert.equal(MAX_COMPILED_PERSONA, 1060);
 });
 
 test('entitySlugOf:缺省=项目自身;有 entitySlug 时返回之(legacy 兼容)', () => {
@@ -839,5 +850,142 @@ test('validateAcceptanceRouting:缺声明 / 错路由 → 拒绝(AC1)', () => {
 test('validateAcceptanceRouting:无 trigger(模型可验证)route 可为 model-verifiable 或 user-blocking', () => {
   assert.equal(validateAcceptanceRouting([{ ac: 'AC1', route: 'model-verifiable' }]).ok, true);
   assert.equal(validateAcceptanceRouting([{ ac: 'AC1', route: 'user-blocking' }]).ok, true, '无 trigger 也可声明 user-blocking(用户主动)');
+});
+
+// ── 批量沉淀机制(0.18.0,kr-sediment-batch):阈值检测纯函数 ──
+
+/** 构造 REGISTRY 桩(供沉淀纯函数测试)。 */
+function mkReg(id, state, title, createdAt, updatedAt) {
+  return { id, state, title, createdAt, updatedAt };
+}
+
+test('常量钉死:SEDIMENT_TITLE_PREFIX / DEFAULT_SEDIMENT_THRESHOLD / SEDIMENT_FLOW_TEMPLATE / SEDIMENT_TRIGGER_MESSAGE / DEFAULT_SEDIMENTATION', () => {
+  assert.equal(SEDIMENT_TITLE_PREFIX, '沉淀');
+  assert.equal(DEFAULT_SEDIMENT_THRESHOLD, 10);
+  assert.equal(SEDIMENT_FLOW_TEMPLATE, 'sediment-flow');
+  assert.match(SEDIMENT_TRIGGER_MESSAGE, /已达沉淀阈值/);
+  assert.deepEqual(DEFAULT_SEDIMENTATION, { enabled: true, everyNDelivered: 10 });
+});
+
+test('normalizeSedimentation:缺省/非法字段回退默认;合法原样(开关配置归一)', () => {
+  assert.deepEqual(normalizeSedimentation(undefined), { enabled: true, everyNDelivered: 10 }, '缺省回退默认');
+  assert.deepEqual(normalizeSedimentation(null), { enabled: true, everyNDelivered: 10 }, 'null 回退默认');
+  assert.deepEqual(normalizeSedimentation('x'), { enabled: true, everyNDelivered: 10 }, '非对象回退默认');
+  assert.deepEqual(normalizeSedimentation({ enabled: false, everyNDelivered: 5 }), { enabled: false, everyNDelivered: 5 }, '合法原样');
+  assert.deepEqual(normalizeSedimentation({ enabled: 'yes', everyNDelivered: 0 }), { enabled: true, everyNDelivered: 10 }, '非法字段回退默认');
+  assert.deepEqual(normalizeSedimentation({ enabled: true }), { enabled: true, everyNDelivered: 10 }, '缺 everyNDelivered 回退默认');
+  assert.deepEqual(normalizeSedimentation({ everyNDelivered: 3 }), { enabled: true, everyNDelivered: 3 }, '缺 enabled 回退默认 true');
+});
+
+test('isSedimentProject:title 带「沉淀」前缀 → true;普通项目/非对象 → false(存量零影响)', () => {
+  assert.equal(isSedimentProject({ title: '沉淀:批量沉淀' }), true);
+  assert.equal(isSedimentProject({ title: '沉淀项目' }), true);
+  assert.equal(isSedimentProject({ title: '普通项目' }), false, '普通项目非沉淀');
+  assert.equal(isSedimentProject({ title: '' }), false);
+  assert.equal(isSedimentProject(null), false);
+  assert.equal(isSedimentProject({}), false);
+});
+
+test('lastSedimentRegistrationAt:取最近沉淀项目 createdAt;无沉淀 → null', () => {
+  const registries = [
+    mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z'),
+    mkReg('sed-1', 'active', '沉淀:批量沉淀', '2026-09-01T03:00:00.000Z', '2026-09-01T03:00:00.000Z'),
+    mkReg('sed-2', 'delivered', '沉淀:批量沉淀2', '2026-09-02T00:00:00.000Z', '2026-09-02T01:00:00.000Z'),
+  ];
+  assert.equal(lastSedimentRegistrationAt(registries), '2026-09-02T00:00:00.000Z', '取最近沉淀项目 createdAt');
+  assert.equal(lastSedimentRegistrationAt([mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z')]), null, '无沉淀 → null');
+  assert.equal(lastSedimentRegistrationAt([]), null);
+  assert.equal(lastSedimentRegistrationAt(null), null);
+});
+
+test('countDeliveredSinceSediment:自最近沉淀登记以来 delivered 数(从 REGISTRY 派生,沉淀自身不计)', () => {
+  const registries = [
+    mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z'),
+    mkReg('p2', 'delivered', 'P2', '2026-09-01T00:00:00.000Z', '2026-09-01T02:00:00.000Z'),
+    mkReg('sed-1', 'delivered', '沉淀:批量沉淀', '2026-09-01T03:00:00.000Z', '2026-09-01T04:00:00.000Z'),
+    mkReg('p3', 'delivered', 'P3', '2026-09-01T00:00:00.000Z', '2026-09-01T05:00:00.000Z'),
+    mkReg('p4', 'active', 'P4', '2026-09-01T00:00:00.000Z', '2026-09-01T06:00:00.000Z'),
+  ];
+  // 锚点 = sed-1 createdAt(03:00);delivered 且 updatedAt>锚点 → p3(05:00) 计 1。
+  // sed-1 自身(沉淀)不计入普通交付;active 的 p4 不计。
+  assert.equal(countDeliveredSinceSediment(registries), 1);
+  // 无沉淀项目 → 全部 delivered 数(p1/p2/p3,不含 sed-1)。
+  assert.equal(countDeliveredSinceSediment([registries[0], registries[1], registries[3]]), 3);
+  // 空/坏条目跳过(registry-halfwrite-read-tolerance)。
+  assert.equal(countDeliveredSinceSediment([]), 0);
+  assert.equal(countDeliveredSinceSediment([null, 'x', { state: 'delivered' }]), 0);
+});
+
+test('hasActiveOrParkedSediment:active/parked 沉淀项目存在 → true;delivered/rejected/普通 → false', () => {
+  assert.equal(hasActiveOrParkedSediment([mkReg('s', 'active', '沉淀:x', 't', 't')]), true);
+  assert.equal(hasActiveOrParkedSediment([mkReg('s', 'parked', '沉淀:x', 't', 't')]), true);
+  assert.equal(hasActiveOrParkedSediment([mkReg('s', 'delivered', '沉淀:x', 't', 't')]), false, 'delivered 沉淀不构成防重复');
+  assert.equal(hasActiveOrParkedSediment([mkReg('s', 'rejected', '沉淀:x', 't', 't')]), false, 'rejected 沉淀不构成防重复');
+  assert.equal(hasActiveOrParkedSediment([mkReg('p', 'active', '普通', 't', 't')]), false, '普通项目非沉淀');
+  assert.equal(hasActiveOrParkedSediment([]), false);
+});
+
+test('sedimentThresholdMet:满 N 触发(happy path,AC1)', () => {
+  const registries = [
+    mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z'),
+    mkReg('p2', 'delivered', 'P2', '2026-09-01T00:00:00.000Z', '2026-09-01T02:00:00.000Z'),
+    mkReg('p3', 'delivered', 'P3', '2026-09-01T00:00:00.000Z', '2026-09-01T03:00:00.000Z'),
+  ];
+  const check = sedimentThresholdMet(registries, 3);
+  assert.equal(check.triggered, true, '满 N 触发');
+  assert.equal(check.count, 3);
+  assert.equal(check.threshold, 3);
+  assert.equal(check.reason, undefined, '触发无 reason');
+});
+
+test('sedimentThresholdMet:未满 N 不触发', () => {
+  const registries = [
+    mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z'),
+    mkReg('p2', 'delivered', 'P2', '2026-09-01T00:00:00.000Z', '2026-09-01T02:00:00.000Z'),
+  ];
+  const check = sedimentThresholdMet(registries, 3);
+  assert.equal(check.triggered, false, '未满 N 不触发');
+  assert.equal(check.count, 2);
+  assert.equal(check.threshold, 3);
+});
+
+test('sedimentThresholdMet:防重复触发——已有 active/parked 沉淀项目不重登(AC1)', () => {
+  const registries = [
+    mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z'),
+    mkReg('p2', 'delivered', 'P2', '2026-09-01T00:00:00.000Z', '2026-09-01T02:00:00.000Z'),
+    mkReg('p3', 'delivered', 'P3', '2026-09-01T00:00:00.000Z', '2026-09-01T03:00:00.000Z'),
+    mkReg('sed-1', 'active', '沉淀:批量沉淀', '2026-09-01T04:00:00.000Z', '2026-09-01T04:00:00.000Z'),
+  ];
+  const check = sedimentThresholdMet(registries, 3);
+  assert.equal(check.triggered, false, '已有 active 沉淀项目 → 不触发');
+  assert.match(check.reason, /防重复触发/);
+  // parked 沉淀同样防重复。
+  const parked = sedimentThresholdMet([...registries.slice(0, 3), mkReg('sed-1', 'parked', '沉淀:x', 't', 't')], 3);
+  assert.equal(parked.triggered, false, '已有 parked 沉淀项目 → 不触发');
+});
+
+test('sedimentThresholdMet:并发边界——登记沉淀项目后不再触发(只触发一次,AC1)', () => {
+  const registries = [
+    mkReg('p1', 'delivered', 'P1', '2026-09-01T00:00:00.000Z', '2026-09-01T01:00:00.000Z'),
+    mkReg('p2', 'delivered', 'P2', '2026-09-01T00:00:00.000Z', '2026-09-01T02:00:00.000Z'),
+    mkReg('p3', 'delivered', 'P3', '2026-09-01T00:00:00.000Z', '2026-09-01T03:00:00.000Z'),
+  ];
+  // 无沉淀 → 满 3 触发。
+  assert.equal(sedimentThresholdMet(registries, 3).triggered, true);
+  // 登记 active 沉淀项目后(锚点=沉淀 createdAt)→ 不再触发(并发只触发一次)。
+  const withSediment = [...registries, mkReg('sed-1', 'active', '沉淀:批量沉淀', '2026-09-01T04:00:00.000Z', '2026-09-01T04:00:00.000Z')];
+  const check = sedimentThresholdMet(withSediment, 3);
+  assert.equal(check.triggered, false, '登记沉淀项目后不再触发');
+  assert.equal(check.count, 0, '锚点重置:沉淀登记后无新 delivered');
+  assert.match(check.reason, /防重复触发/);
+});
+
+test('sedimentThresholdMet:阈值非法/缺省 → 回退默认 N=10;空注册表 → 不触发', () => {
+  assert.equal(sedimentThresholdMet([], 3).triggered, false);
+  assert.equal(sedimentThresholdMet([], 3).threshold, 3);
+  assert.equal(sedimentThresholdMet([], 0).threshold, DEFAULT_SEDIMENT_THRESHOLD, 'N=0 非法回退默认');
+  assert.equal(sedimentThresholdMet([], -1).threshold, DEFAULT_SEDIMENT_THRESHOLD, 'N<0 非法回退默认');
+  assert.equal(sedimentThresholdMet([], 'x').threshold, DEFAULT_SEDIMENT_THRESHOLD, 'N 非整数回退默认');
+  assert.equal(sedimentThresholdMet(null, 3).triggered, false, '空注册表不触发');
 });
 

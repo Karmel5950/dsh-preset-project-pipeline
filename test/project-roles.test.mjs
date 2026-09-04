@@ -272,7 +272,7 @@ test('preset 自带库可读:6 角色 + standard-flow(11 阶段)+ iteration-flow
     }
 
     const flows = await byName.flow_list.execute({}, exec);
-    assert.equal(flows.flows.length, 2, 'standard-flow + iteration-flow');
+    assert.equal(flows.flows.length, 3, 'standard-flow + iteration-flow + sediment-flow(0.18.0)');
     const std = flows.flows.find((f) => f.id === 'standard-flow');
     assert.equal(std.version, 1);
     assert.equal(std.source, 'preset');
@@ -281,6 +281,9 @@ test('preset 自带库可读:6 角色 + standard-flow(11 阶段)+ iteration-flow
     assert.equal(iter.version, 1);
     assert.equal(iter.source, 'preset');
     assert.equal(iter.stageCount, 7);
+    const sed = flows.flows.find((f) => f.id === 'sediment-flow');
+    assert.equal(sed.source, 'preset');
+    assert.equal(sed.stageCount, 6, 'sediment-flow 复用 lite-flow 结构(6 阶段)');
 
     const flow = await byName.flow_show.execute({ flow: 'standard-flow' }, exec);
     assert.deepEqual(
@@ -344,12 +347,14 @@ test('库合并:workspace 覆盖 preset(同 id workspace 胜),workspace 新增�
     assert.ok(shown.workspaceNote.includes('demo-proj'), '提供 projectId 时说明含真实项目 id');
 
     const flows = await byName.flow_list.execute({}, exec);
-    assert.equal(flows.flows.length, 2, 'standard-flow(workspace 覆盖)+ iteration-flow(preset)');
+    assert.equal(flows.flows.length, 3, 'standard-flow(workspace 覆盖)+ iteration-flow(preset)+ sediment-flow(preset)');
     const std = flows.flows.find((f) => f.id === 'standard-flow');
     assert.equal(std.source, 'workspace');
     assert.equal(std.stageCount, 2, 'workspace 同 id 模板覆盖 preset');
     const iter = flows.flows.find((f) => f.id === 'iteration-flow');
     assert.equal(iter.source, 'preset', 'iteration-flow 保留 preset 源');
+    const sed = flows.flows.find((f) => f.id === 'sediment-flow');
+    assert.equal(sed.source, 'preset', 'sediment-flow 保留 preset 源');
   }));
 
 test('坏清单条目跳过且 errors 上报,不炸工具(角色 + 流程)', async () =>

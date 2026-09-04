@@ -19,6 +19,11 @@ import { apply, inject, name } from '../plugins/project-registry.mjs';
 import {
   BUDGET_SOURCES,
   STAGE_TYPES,
+  DEFAULT_AUDIT_META,
+  DEFAULT_SEDIMENT_THRESHOLD,
+  SEDIMENT_FLOW_TEMPLATE,
+  SEDIMENT_TITLE_PREFIX,
+  SEDIMENT_TRIGGER_MESSAGE,
   nowStamp,
   readJson,
   registryPaths,
@@ -146,6 +151,31 @@ async function writeProjcache(workspace, sessions) {
   return file;
 }
 
+/** 写一份合法 audit-rules.json(meta 段可覆盖,供批量沉淀阈值 N 测试)。rules 须非空(validateAuditRules 要求)。 */
+async function writeAuditRules(workspace, metaOver = {}) {
+  await mkdir(join(workspace, '.dsh-library'), { recursive: true });
+  await writeJson(join(workspace, '.dsh-library', 'audit-rules.json'), {
+    schemaVersion: 1,
+    meta: { ...DEFAULT_AUDIT_META, ...metaOver },
+    rules: [{
+      id: 'R-test',
+      observe: 'O4',
+      when: { categoryCountGte: 99 },
+      act: 'F1',
+      object: 'test',
+    }],
+  });
+}
+
+/** 快捷:登记并交付一个 mini-flow 项目(返回 { projectId, result })。 */
+async function deliverMini(t, ctx, workspace, title) {
+  const reg = await getTool(ctx, 'project_register').execute({ title, requirement: 'r', flowTemplate: 'mini-flow' }, sessionContext(workspace));
+  const projectId = reg.projectId;
+  await advanceTo(t, ctx, workspace, projectId, 2); // → wrap(最后阶段)
+  const result = await getTool(ctx, 'project_advance').execute({ projectId }, sessionContext(workspace));
+  return { projectId, result };
+}
+
 // ── 插件元数据与挂载 ────────────────────────────────────────────────────────
 
 test('插件元数据:8 个工具 + 1 条手册提示段(注册常驻,不接线 ctx.effect)', async () => {
@@ -166,7 +196,7 @@ test('插件元数据:8 个工具 + 1 条手册提示段(注册常驻,不接线 
   const section = ctx.systemPrompt.items[0];
   assert.equal(section.name, 'project-pipeline/manual');
   assert.equal(section.order, 140);
-  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'project_harvest', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked', 'id 入参', 'runtime-events', 'projcache', 'sessions', '底座', 'entitySlug', 'readings', 'MAX_COMPILED_PERSONA', '消费路由', 'negative-premises', 'lessons-index', 'totalToken', 'cacheRate', 'byModel', 'unknown', 'model 来源说明', '自省审计回路', 'project_audit', 'audit-rules', 'audit-trail', '证据链', '验收路由前置化', 'acceptance-routing', 'user-blocking', 'real-session', 'visual-browser', 'deploy-restart', 'real-upstream-credential']) {
+  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'project_harvest', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked', 'id 入参', 'runtime-events', 'projcache', 'sessions', '底座', 'entitySlug', 'readings', 'MAX_COMPILED_PERSONA', '消费路由', 'negative-premises', 'lessons-index', 'totalToken', 'cacheRate', 'byModel', 'unknown', 'model 来源说明', '自省审计回路', 'project_audit', 'audit-rules', 'audit-trail', '证据链', '验收路由前置化', 'acceptance-routing', 'user-blocking', 'real-session', 'visual-browser', 'deploy-restart', 'real-upstream-credential', '批量沉淀机制', 'sedimentation', '沉淀', 'sediment-flow', '已达沉淀阈值']) {
     assert.ok(section.text.includes(word), `手册段应包含 ${word}`);
   }
 });
@@ -1975,4 +2005,94 @@ test('delivery-gate present:非 delivery-gate 门禁不受机械核对影响(回
     projectId, stageId: 'review', action: 'present', package: { summary: 's' },
   }, context);
   assert.equal(present.gateStatus, 'pending', '非 delivery-gate 门禁照常呈递');
+});
+
+// ── 批量沉淀机制(0.18.0,kr-sediment-batch):advance-to-delivered 触发指令 ──
+
+test('advance-to-delivered:满 N 触发沉淀指令(happy path,AC1)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  await writeAuditRules(workspace, { sedimentation: { enabled: true, everyNDelivered: 3 } });
+  const ctx = await mountPlugin();
+  // 先交付 2 个(未满 3,不触发)。
+  await deliverMini(t, ctx, workspace, 'P1');
+  await deliverMini(t, ctx, workspace, 'P2');
+  // 第 3 个交付 → 触发。
+  const { result } = await deliverMini(t, ctx, workspace, 'P3');
+  assert.equal(result.delivered, true);
+  assert.equal(result.sediment.triggered, true, '满 N 触发');
+  assert.equal(result.sediment.count, 3);
+  assert.equal(result.sediment.threshold, 3);
+  assert.match(result.sediment.message, /已达沉淀阈值/);
+});
+
+test('advance-to-delivered:未满 N 不触发(AC1)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  await writeAuditRules(workspace, { sedimentation: { enabled: true, everyNDelivered: 5 } });
+  const ctx = await mountPlugin();
+  const { result } = await deliverMini(t, ctx, workspace, 'P1');
+  assert.equal(result.delivered, true);
+  assert.equal(result.sediment.triggered, false, '未满 N 不触发');
+  assert.equal(result.sediment.count, 1);
+  assert.equal(result.sediment.threshold, 5);
+});
+
+test('advance-to-delivered:已有 active/parked 沉淀项目 → 不触发(防重复,AC1)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  await writeAuditRules(workspace, { sedimentation: { enabled: true, everyNDelivered: 2 } });
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  // 交付 2 个 → 触发。
+  await deliverMini(t, ctx, workspace, 'P1');
+  const { result } = await deliverMini(t, ctx, workspace, 'P2');
+  assert.equal(result.sediment.triggered, true, '满 2 触发');
+  // 登记一个 active 沉淀项目(title 带「沉淀」前缀)。
+  await getTool(ctx, 'project_register').execute({ title: '沉淀:批量沉淀', id: 'sediment-1', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  // 再交付一个 → 不触发(已有 active 沉淀项目)。
+  const { result: r3 } = await deliverMini(t, ctx, workspace, 'P3');
+  assert.equal(r3.sediment.triggered, false, '已有 active 沉淀项目 → 不触发');
+  assert.match(r3.sediment.reason, /防重复触发/);
+});
+
+test('advance-to-delivered:audit-rules 缺失 → 回退默认 N=10(免部署生效,AC3)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  // 不写 audit-rules.json → readAuditRules 回退 DEFAULT_AUDIT_META(sedimentation.everyNDelivered=10)。
+  const ctx = await mountPlugin();
+  const { result } = await deliverMini(t, ctx, workspace, 'P1');
+  assert.equal(result.sediment.triggered, false, '默认 N=10,1 个不触发');
+  assert.equal(result.sediment.threshold, DEFAULT_SEDIMENT_THRESHOLD, '回退默认 N=10');
+});
+
+test('advance-to-delivered:开关关闭(enabled=false)→ 不产生登记指令(代码层短路,计数继续累计)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow');
+  await writeAuditRules(workspace, { sedimentation: { enabled: false, everyNDelivered: 2 } });
+  const ctx = await mountPlugin();
+  // 交付 2 个(满 N)但开关关闭 → 不触发,计数继续累计。
+  await deliverMini(t, ctx, workspace, 'P1');
+  const { result } = await deliverMini(t, ctx, workspace, 'P2');
+  assert.equal(result.sediment.triggered, false, '开关关闭 → 不产生登记指令');
+  assert.equal(result.sediment.enabled, false, 'sediment.enabled=false');
+  assert.equal(result.sediment.count, 2, '计数继续累计(满 N 但被开关短路)');
+  assert.match(result.sediment.reason, /开关关闭/);
+});
+
+test('advance-to-delivered:非结项推进不携带 sediment 指令(仅 delivered 触发面)', async (t) => {
+  const { workspace, ctx, projectId } = await registerMini(t);
+  const context = sessionContext(workspace);
+  const result = await getTool(ctx, 'project_advance').execute({ projectId }, context);
+  assert.equal(result.delivered, false);
+  assert.equal(result.sediment, undefined, '非结项推进不携带 sediment');
+});
+
+test('advance-to-delivered:MANUAL_TEXT 手册段含批量沉淀机制小节', async () => {
+  const ctx = await mountPlugin();
+  const section = ctx.systemPrompt.items[0];
+  assert.ok(section.text.includes('批量沉淀机制'), '手册段应含「批量沉淀机制」');
+  assert.ok(section.text.includes('sedimentation'), '手册段应含 sedimentation');
+  assert.ok(section.text.includes('sediment-flow'), '手册段应含 sediment-flow 模板');
+  assert.ok(section.text.includes('已达沉淀阈值'), '手册段应含触发指令文本');
 });

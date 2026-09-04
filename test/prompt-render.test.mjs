@@ -13,14 +13,17 @@
 // 参考 tmp-poc-render.mjs 搬用。运行:cd presets/project-pipeline && node --test test/prompt-render.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { apply } from '../plugins/project-registry.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-// 生产路径:dsh-runtime 与 plugindev 平级(dsh/ 仓库根)。test → project-pipeline → presets → plugindev → dsh。
-const RUNTIME_ROOT = join(HERE, '..', '..', '..', '..', 'dsh-runtime');
+// 生产路径:dsh-runtime 与 plugindev 平级(dsh/ 仓库根);自测 harness 布局更深。
+// 不硬编码层级:从本目录向上探测含 dsh-runtime 的祖先,两种布局通用。
+let runtimeProbe = HERE;
+for (let i = 0; i < 12 && !existsSync(join(runtimeProbe, 'dsh-runtime', 'node_modules', '@deepseek-ai', 'dsh-system-prompt')); i++) runtimeProbe = dirname(runtimeProbe);
+const RUNTIME_ROOT = join(runtimeProbe, 'dsh-runtime');
 
 /** 事故样本:{{base}} 字面量(0.10.0 那次事故的形态)。 */
 const INCIDENT_SAMPLE = '- 每维先「查底座 + lessons-index 再下结论」:读 {{base}}/.dsh-library/lessons-index.json 与 {{base}}/.dsh-library/rulings.json。';
@@ -46,6 +49,9 @@ test('AC7-① mock ctx 捕获 project-pipeline/manual section 与工具注册清
   // AC4(0.16.0):MANUAL_TEXT 含「验收路由前置化」小节,且不含 {{template}} 变量(prompt-render-template-var-guard)。
   assert.ok(manual.text.includes('验收路由前置化'), 'MANUAL_TEXT 应含「验收路由前置化」小节');
   assert.ok(manual.text.includes('acceptance-routing'), 'MANUAL_TEXT 应含 acceptance-routing 结构化字段说明');
+  // 0.18.0(kr-sediment-batch):MANUAL_TEXT 含「批量沉淀机制」小节,且不含 {{template}} 变量。
+  assert.ok(manual.text.includes('批量沉淀机制'), 'MANUAL_TEXT 应含「批量沉淀机制」小节');
+  assert.ok(manual.text.includes('sedimentation'), 'MANUAL_TEXT 应含 sedimentation');
   assert.ok(!/{{[a-zA-Z0-9_-]+}}/.test(manual.text), 'MANUAL_TEXT 不应含 {{template}} 变量(防误解析)');
   const toolNames = tools.map((t) => t.name).sort();
   // 登记簿 7 工具(register/advance/gate/budget/status/block/harvest)。
