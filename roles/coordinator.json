@@ -31,6 +31,7 @@
       "todo_write",
       "project_block",
       "project_harvest",
+      "project_audit",
       "subagent_architect",
       "subagent_deliverer",
       "subagent_dev",
