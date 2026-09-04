@@ -26,7 +26,7 @@ try {
     const shown = await roleShow.execute({ role, projectId: 'kr-p1-base' }, exec);
     const compiledLen = shown.subagent.persona.length;
     const rawLen = shown.persona.length;
-    const ok = compiledLen <= 1000;
+    const ok = compiledLen <= 1060;
     if (!ok) allPass = false;
     results.push({ role, rawLen, compiledLen, ok, readings: shown.readings });
     console.log(`role=${role} rawPersona=${rawLen} compiledPersona=${compiledLen} ok=${ok}`);

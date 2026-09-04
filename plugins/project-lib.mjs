@@ -20,7 +20,7 @@
 //   - aggregateByRole(sessions, projcache):按 REGISTRY.sessions 角色桶聚合 tokenUsage。
 //     零 npm import;可单测(注入临时 projcache 文件)。
 // 0.10.0 新增(项目底座层 Base Dossier P1,2026-09-01):
-//   - MAX_COMPILED_PERSONA=1000(C4a:编译后 persona 头+正文合计上限);
+//   - MAX_COMPILED_PERSONA=1060(C4a:编译后 persona 头+正文合计上限;2026-09-04 由 1000 抬至 1060:长 entity slug(如 r-lesson-storm-mtmc1gb4,24 字符)的 readings 头实测 1009,超限阻断 spawn;300→450→700→1000→1060 渐进史);
 //   - entitySlugOf / baseDossierPaths / baseDossierExists(实体仓底座四件套路径);
 //   - validateReadings / expandReadings / compileReadingsHeader(role manifest readings 段);
 //   - validateRole 增 readings 只增校验。
@@ -81,7 +81,7 @@ export const BUDGET_SOURCES = ['self-report', 'runtime-events', 'billing-plugin'
  * compileSubagent 把 readings 展开的"进场必读"头前置到 persona 后,若头+正文合计
  * 超本上限,在 role_show 编译期抛错(不静默截断)。
  */
-export const MAX_COMPILED_PERSONA = 1000;
+export const MAX_COMPILED_PERSONA = 1060;
 
 /** 卡点分类白名单(= 五维可行性维度 + other;与 project-registry 的 BLOCKER_CATEGORIES 对齐)。 */
 export const BLOCKER_CATEGORIES = [

@@ -1,3 +1,8 @@
+## [0.17.1] - 2026-09-04
+
+### Fixed
+- **persona 编译上限 1000 → 1060**(MAX_COMPILED_PERSONA):长 entity slug(如 F2 自主立项 r-lesson-storm-mtmc1gb4,24 字符)的 readings 头编译实测 1009,超限阻断协调者 spawn,自动项目「出生即冻结」。300→450→700→1000→1060 渐进史延续;触发场景与数字写入常量注释。verify-c4c 与 roles 测试阈值同步。
+
 # CHANGELOG 建议条目(kr-toolface-audit · 0.17.0)
 
 > 本文件为版本 bump 建议文案,供用户侧并入 `presets/project-pipeline/CHANGELOG.md`。

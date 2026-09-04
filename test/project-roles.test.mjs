@@ -267,7 +267,7 @@ test('preset 自带库可读:6 角色 + standard-flow(11 阶段)+ iteration-flow
         assert.ok(shown.readings.includes('.dsh-library/lessons-index.json'), 'coordinator readings 应含 lessons-index.json(P4 AC3)');
       }
       // 编译后 persona(进场必读头+正文)不超 MAX_COMPILED_PERSONA(1000)。
-      assert.ok(shown.subagent.persona.length <= 1000, `${role.id} 编译后 persona ≤1000`);
+      assert.ok(shown.subagent.persona.length <= 1060, `${role.id} 编译后 persona ≤1060`);
       assert.ok(shown.subagent.persona.includes('进场必读:'), `${role.id} 编译后 persona 含进场必读头`);
     }
 
@@ -651,7 +651,7 @@ test('role_show 给 projectId:readings 展开为具体路径清单,编译后 per
     // 编译后 persona 含进场必读头 + 具体路径。
     assert.ok(shown.subagent.persona.includes('进场必读:'), '编译后 persona 含进场必读头');
     assert.ok(shown.subagent.persona.includes('.dsh-base/shared-entity/MAP.md'), '编译后 persona 含展开路径');
-    assert.ok(shown.subagent.persona.length <= 1000, '编译后 persona ≤1000');
+    assert.ok(shown.subagent.persona.length <= 1060, '编译后 persona ≤1060');
   }));
 
 test('role_show 给 projectId:登记簿读不到 entitySlug → 缺省=项目自身', async () =>
@@ -664,7 +664,7 @@ test('role_show 给 projectId:登记簿读不到 entitySlug → 缺省=项目自
 
 test('compileSubagent:readings 编译超限(>MAX_COMPILED_PERSONA)在 role_show 编译期抛错', async () =>
   withWorkspace(async (workspace) => {
-    // 造一个 readings 极长的角色(路径模板超长 → 编译后 persona 超 1000)。
+    // 造一个 readings 极长的角色(路径模板超长 → 编译后 persona 超 1060)。
     const longPath = '{{base}}/' + 'x'.repeat(1200) + '.md';
     await writeJsonFile(path.join(workspace, '.dsh-library', 'roles', 'long-readings.json'), {
       id: 'long-readings',
