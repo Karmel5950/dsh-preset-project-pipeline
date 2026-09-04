@@ -1,3 +1,39 @@
+# CHANGELOG 建议条目(kr-toolface-audit · 0.17.0)
+
+> 本文件为版本 bump 建议文案,供用户侧并入 `presets/project-pipeline/CHANGELOG.md`。
+
+## [0.17.0] - 2026-09-04
+
+角色工具面一致性审计(kr-toolface-audit 交付;背景:kr-p4-route 事故——roles allow 有
+project_harvest 而 per-role 行没有,现有测试测不出,因为两集各自 ⊆ 真实面仍成立)。
+
+- **L1 vs L2 交叉核对(核心缺口)**:`checkL1vsL2` 纯函数——roles/*.json tools.allow vs
+  agent.cordis.yml per-role 行 config.toolFilter.allow 逐字比对。命中 kr-p4-route 类漂移
+  (roles 有而 per-role 行无 → 角色实际调不起)与反向漂移(per-role 行有而 roles 无 →
+  白名单授予未声明工具)。两集各自 ⊆ 真实面仍成立时,本核对仍能命中。
+- **L2 vs L3 / L1 vs L3 核对提取为可复用纯函数**:`checkL2vsL3`(白名单引用真实面不存在
+  工具 → spawn 被拒)、`checkL1vsL3`(roles 引用真实面不存在工具)、`checkForbidden`
+  (bash/web_fetch/通用 subagent/subagent_fork)。
+- **统一核对入口 `auditToolface`**:输入 roles 清单 + agent.cordis.yml 文本 + 真实工具面,
+  输出结构化漂移报告(哪层 vs 哪层、缺哪个工具、方向=declared-extra/real-missing/
+  real-extra/forbidden)+ 按层对聚合 + L4 冻结语义。纯函数便于单测构造漂移样本。
+- **L4 spawn 冻结语义文档化**:`TOOLFACE_FREEZE_SEMANTICS` 常量——白名单唯一承重路径 =
+  per-role 行 toolFilter.allow;改白名单须重 spawn,resume 不生效;fork 携带 fork 行
+  toolFilter。
+- **核对入口脚本化(AC3)**:`toolface-audit.mjs` 入口脚本,`--preset` 指定 preset 目录,
+  `--real-surface` 注入运行时真实工具面,`--json` 结构化输出(供 harvest/审计回路调用),
+  退出码 0=无漂移 / 1=有漂移(供 CI)。
+- 版本 0.16.0 → **0.17.0(minor)**:工具面一致性核对入口 = 能力新增。
+- 测试:新增 `test/toolface-audit.test.mjs`(15 例:解析 happy path、L1vsL2 逐类命中
+  (kr-p4-route 根因/反向/整面缺失)、L2vsL3/L1vsL3/forbidden、auditToolface 干净样本
+  happy path + 漂移聚合、L4 冻结语义文档化、常量完整性)。覆盖仓库全部相关测试文件
+  (selftest-must-cover-repo-test-files),新增逻辑分支均有 happy path 测试
+  (test-coverage-happy-path)。
+- **AC2 真机 + AC4 见证(r4)**:真实环境跑一轮(已知漂移清零或显式列出剩余漂移)+ 全量
+  测试绿 + deploy IN SYNC,由用户侧 blocking 执行;流水线只做单测/静态核对。
+- 触点:presets/project-pipeline/(project-lib.mjs、scripts/、test/、package.json)→
+  **r2 交付 deliverables/ + APPLY.md** + **r3 deploy 至 IN SYNC + 重启**(重启窗口并入攒批)。
+
 # Changelog
 
 本 preset 的全部显著变更记录在此文件。
