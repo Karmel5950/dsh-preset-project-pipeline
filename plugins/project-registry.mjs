@@ -74,6 +74,14 @@
 //     (F2 走 project_register auto:true / F1 呈递 payload / F3 直改留痕),写 .dsh-library/audit-trail.json
 //     append-only;领地白名单硬校验(规则表 act:F4 / 对 F1 客体升权 F2 → 引擎拒绝报错=AC1)。
 //   - MANUAL_TEXT 增「自省审计回路」小节 + 工具速查补 project_audit 条目。
+// 0.16.0 新增(验收路由前置化 kr-accept-route,2026-09-04):
+//   - delivery-gate present 机械核对:读 SPEC.md 解析 acceptance-routing 结构化字段,
+//     调 project-lib.validateAcceptanceRouting 校验 AC 对照表路由声明;非法 → 拒绝呈递
+//     (r4 语义:真机项由用户侧 blocking 执行,不得以静态放行替代)。
+//   - MANUAL_TEXT 增「验收路由前置化」小节 + 工具速查补 delivery-gate 机械核对句。
+//   - (delivery-gate 第 1 轮 revise 返工,存量项目零影响)块缺失(存量/未声明)→ 不拒绝,
+//     跳过核对,呈递包加观察行「acceptance-routing 块缺失(存量/未声明),路由核对未执行」;
+//     块存在 → 严格校验(非法仍 throw);SPEC.md 文件缺失仍 throw(契约违例)。
 
 import { existsSync, readFileSync } from 'node:fs';
 import { appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
@@ -119,6 +127,10 @@ import {
   readJsonRetry,
   runObservations,
   validateAuditRules,
+  ACCEPTANCE_ROUTES,
+  ACCEPTANCE_TRIGGER_CLASSES,
+  parseAcceptanceRouting,
+  validateAcceptanceRouting,
 } from './project-lib.mjs';
 
 export const name = 'project-pipeline-registry';
@@ -517,6 +529,42 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
   async function writeText(file, text) {
     await mkdir(join(file, '..'), { recursive: true });
     await writeFile(file, text, 'utf8');
+  }
+
+  /**
+   * 验收路由前置化机械核对(0.16.0,kr-accept-route,delivery-gate 第 1 轮 revise 返工):
+   * 仅对 delivery-gate 阶段生效。读 <projectDir>/SPEC.md,解析 acceptance-routing 结构化
+   * 字段,调 project-lib 的 validateAcceptanceRouting 校验 AC 对照表路由声明。
+   * 行为(存量项目零影响):
+   *   - SPEC.md 文件缺失 → throw(流水线契约违例,另一回事);
+   *   - SPEC 存在但 acceptance-routing 块缺失(存量/未声明)→ 不拒绝,跳过核对,
+   *     返回 { skipped:true, note }(delivery-gate 呈递包据此加观察行,缺口可见不阻断);
+   *   - 块存在 → 严格校验(非法/错路由 → throw 拒绝呈递,r4 语义)。
+   * 非 delivery-gate 阶段直接返回 undefined(不影响既有门禁)。
+   */
+  async function checkAcceptanceRouting(paths, stageId) {
+    if (stageId !== 'delivery-gate') return undefined;
+    const specFile = join(paths.projectDir, 'SPEC.md');
+    let specText;
+    try {
+      specText = await readFile(specFile, 'utf8');
+    } catch (error) {
+      throw new Error(`${name}/project_gate: delivery-gate 机械核对需要 SPEC.md(读取失败:${error?.code ?? error?.message ?? error})`);
+    }
+    const parsed = parseAcceptanceRouting(specText);
+    if (parsed.error) {
+      // 块缺失(存量/未声明)→ 不拒绝,跳过核对,返回观察行。
+      if (parsed.missing) {
+        return { skipped: true, note: 'acceptance-routing 块缺失(存量/未声明),路由核对未执行' };
+      }
+      // 块存在但畸形(未闭合/行格式非法/空块)→ 严格校验,拒绝呈递。
+      throw new Error(`${name}/project_gate: delivery-gate 机械核对失败(SPEC acceptance-routing 解析):${parsed.error}`);
+    }
+    const checked = validateAcceptanceRouting(parsed.entries);
+    if (!checked.ok) {
+      throw new Error(`${name}/project_gate: delivery-gate 机械核对失败(AC 对照表路由声明非法):${checked.errors.join('; ')}`);
+    }
+    return undefined;
   }
 
   /**
@@ -1096,6 +1144,14 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
       if (pkg.recommendation !== undefined && typeof pkg.recommendation !== 'string') {
         throw new Error(`${name}/project_gate: package.recommendation 必须是字符串`);
       }
+      // 验收路由前置化(0.16.0,kr-accept-route):delivery-gate 机械核对 AC 对照表路由声明。
+      // 读 SPEC.md 解析 acceptance-routing 结构化字段,调 project-lib.validateAcceptanceRouting
+      // 校验;块存在 → 非法拒绝呈递(r4 语义);块缺失(存量/未声明)→ 不拒绝,呈递包加观察行。
+      const routingCheck = await checkAcceptanceRouting(paths, cur.id);
+      // 块缺失 → 观察行并入呈递包 materials(缺口可见但不阻断)。
+      const presentPkg = routingCheck?.skipped
+        ? { ...pkg, materials: [...(pkg.materials ?? []), routingCheck.note] }
+        : pkg;
       // revise 回环:文件已存在但带裁决 = 上一轮已结束,允许开新一轮(第 N 轮呈递);
       // 文件存在但没有裁决 = 有呈递无裁决,登记簿可能被手改,拒绝覆盖。
       if (existsSync(gatePath)) {
@@ -1109,7 +1165,7 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
         ? [...readFileSync(gatePath, 'utf8').matchAll(GATE_PENDING_MARKER_RE)].length + 1
         : 1;
       const now = new Date().toISOString();
-      const section = presentSection(cur, rounds, now, pkg);
+      const section = presentSection(cur, rounds, now, presentPkg);
       if (existsSync(gatePath)) await appendFile(gatePath, `\n---\n\n${section}`, 'utf8');
       else await writeText(gatePath, `${gateMarkdownHeader(cur, stageIndex, registry)}\n${section}`);
       registry.gateStatus = 'pending';
@@ -2111,6 +2167,14 @@ SPEC(clarify 阶段)必须含「可行性分析」章,五维逐条给结论(可�
 - resolve 必须携带用户裁决结论(决议原文 + 后续安排);留痕进 journal。
 - 背景:i3 美化迭代实测——设计与验收角色无浏览器无视觉,却以"静态层全过/无法验证项不阻塞"完成了视觉任务并推进到 delivered,真值缺陷(raw markdown 裸显)全链放行。本纪律即为封死该通路。
 
+### 验收路由前置化(0.16.0,kr-accept-route)
+- **目标**:验收路由声明前置到 clarify——凡 AC 依赖真机会话 / 视觉浏览器验收 / 部署重启 / 真实上游凭据的,clarify 阶段即声明「用户侧 blocking」,进 SPEC AC 对照表,delivery-gate 机械核对,不再依赖中途卡点上报与事后引用裁决。
+- **四类真机触发类**:real-session(真机会话)/ visual-browser(视觉浏览器验收)/ deploy-restart(部署重启)/ real-upstream-credential(真实上游凭据)。AC 依赖任一 → 必须声明 route=user-blocking。
+- **SPEC 承载(结构化字段)**:SPEC.md 头部 front-matter 含 acceptance-routing 块,每行 AC-id: route 或 AC-id: route|trigger(trigger 为四类触发类之一)。例:AC2: user-blocking|real-session。机械核对解析该结构化字段(不用 markdown 表 regex,更稳)。
+- **delivery-gate 机械核对**:delivery-gate present 时读 SPEC.md 解析 acceptance-routing,调 project-lib.validateAcceptanceRouting 校验。**声明是纪律引导,核对只校验已声明项**:块存在 → 严格校验(非法/错路由 → 拒绝呈递,r4 语义);块缺失(存量/未声明)→ 不拒绝,跳过核对,呈递包加观察行「acceptance-routing 块缺失(存量/未声明),路由核对未执行」,让缺口可见但不阻断。SPEC.md 文件本身缺失仍拒绝(流水线契约违例)。
+- **r4 语义保持**:前置化是路由提前,不是验收口径变更;真机项仍由用户侧 blocking 执行,不得以静态放行替代。
+- **存量采用路径**:新项目 clarify 即声明 acceptance-routing 块;存量项目(legacy/in-flight)自然迭代时不强制回填——块缺失不阻断交付,仅呈递包留观察行。
+
 ### 资源触点互斥声明(机制1,2026-08-30 流程补丁)
 - 每项目在 SPEC 声明「资源触点」(三要素:拟改文件路径[]/拟部署组件[]/需重启 bool;粒度到文件路径/组件名,允许目录级如「整个 ui/ 目录」);REQUIREMENT 尾部留指针行。
 - 协调者派活前对 active 项目清单做触点比对:读自己 SPEC 触点 → project_status 列全部 active → 逐个读其 SPEC 触点 → 冲突判定(同文件路径/同部署组件/同需重启窗口即冲突,目录级按包含关系)。
@@ -2309,7 +2373,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register({
     name: 'project_gate',
-    description: '门禁两步制:present 把摘要/材料/建议写成门禁包(gates/NN-<stageId>.md)并置 pending;decide 记录用户裁决(approve/revise/reject)——revise 必给 reviseTo(work 阶段 id),reject 使项目终态。stageId 必须是当前阶段。',
+    description: '门禁两步制:present 把摘要/材料/建议写成门禁包(gates/NN-<stageId>.md)并置 pending;decide 记录用户裁决(approve/revise/reject)——revise 必给 reviseTo(work 阶段 id),reject 使项目终态。stageId 必须是当前阶段。**delivery-gate present 机械核对(0.16.0)**:读 SPEC.md 解析 acceptance-routing 结构化字段,校验 AC 对照表路由声明(四类真机触发类须声明 user-blocking);块存在 → 非法拒绝呈递;块缺失(存量/未声明)→ 不拒绝,呈递包加观察行。',
     parameters: {
       type: 'object',
       additionalProperties: false,

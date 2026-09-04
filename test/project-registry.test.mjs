@@ -166,7 +166,7 @@ test('插件元数据:8 个工具 + 1 条手册提示段(注册常驻,不接线 
   const section = ctx.systemPrompt.items[0];
   assert.equal(section.name, 'project-pipeline/manual');
   assert.equal(section.order, 140);
-  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'project_harvest', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked', 'id 入参', 'runtime-events', 'projcache', 'sessions', '底座', 'entitySlug', 'readings', 'MAX_COMPILED_PERSONA', '消费路由', 'negative-premises', 'lessons-index', 'totalToken', 'cacheRate', 'byModel', 'unknown', 'model 来源说明', '自省审计回路', 'project_audit', 'audit-rules', 'audit-trail', '证据链']) {
+  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'project_harvest', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked', 'id 入参', 'runtime-events', 'projcache', 'sessions', '底座', 'entitySlug', 'readings', 'MAX_COMPILED_PERSONA', '消费路由', 'negative-premises', 'lessons-index', 'totalToken', 'cacheRate', 'byModel', 'unknown', 'model 来源说明', '自省审计回路', 'project_audit', 'audit-rules', 'audit-trail', '证据链', '验收路由前置化', 'acceptance-routing', 'user-blocking', 'real-session', 'visual-browser', 'deploy-restart', 'real-upstream-credential']) {
     assert.ok(section.text.includes(word), `手册段应包含 ${word}`);
   }
 });
@@ -1865,4 +1865,114 @@ test('project_status 详情 project.budget 增 totalToken 与按 role 展开(byR
   assert.equal(detail.project.budget.totals.totalToken, 160, 'status 详情含统一总 token');
   assert.deepEqual(detail.project.budget.totals.byRoleTotal, { dev: 160 });
   assert.ok(detail.project.budget.totals.byModel.m1, 'byModel 透传');
+});
+
+// ── 验收路由前置化(0.16.0,kr-accept-route):delivery-gate 机械核对 ──
+
+/** 带 delivery-gate 的流程:clarify → delivery-gate。 */
+const DELIVERY_STAGES = [
+  { id: 'clarify', type: 'work', role: 'product', produces: ['SPEC.md'] },
+  { id: 'delivery-gate', type: 'gate', title: '交付验收', present: ['DELIVERY.md'] },
+];
+
+/** 写 SPEC.md(带 acceptance-routing front-matter)。 */
+async function writeSpec(workspace, projectId, routingLines) {
+  const body = routingLines.map((l) => `  ${l}`).join('\n');
+  const spec = `---\nacceptance-routing:\n${body}\n---\n# SPEC\n正文`;
+  await writeFile(join(workspace, projectId, 'SPEC.md'), spec, 'utf8');
+}
+
+test('delivery-gate present:合法 SPEC(四类触发类声明 user-blocking)→ 通过(AC1/AC2 单测)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'delivery-flow', DELIVERY_STAGES);
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'Route Ok', id: 'route-ok', requirement: 'r', flowTemplate: 'delivery-flow' }, context);
+  await writeSpec(workspace, 'route-ok', [
+    'AC1: model-verifiable',
+    'AC2: user-blocking|real-session',
+    'AC3: user-blocking|visual-browser',
+    'AC4: user-blocking|deploy-restart',
+    'AC5: user-blocking|real-upstream-credential',
+  ]);
+  await getTool(ctx, 'project_advance').execute({ projectId: 'route-ok' }, context); // → delivery-gate
+  const present = await getTool(ctx, 'project_gate').execute({
+    projectId: 'route-ok', stageId: 'delivery-gate', action: 'present', package: { summary: '交付验收' },
+  }, context);
+  assert.equal(present.gateStatus, 'pending', '合法 SPEC → 呈递成功');
+});
+
+test('delivery-gate present:缺 acceptance-routing 块(无 front-matter)→ 放行且呈递含观察行(存量/未声明不阻断)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'delivery-flow', DELIVERY_STAGES);
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'Route Missing', id: 'route-missing', requirement: 'r', flowTemplate: 'delivery-flow' }, context);
+  await writeFile(join(workspace, 'route-missing', 'SPEC.md'), '# SPEC\n无 front-matter', 'utf8');
+  await getTool(ctx, 'project_advance').execute({ projectId: 'route-missing' }, context);
+  const present = await getTool(ctx, 'project_gate').execute({
+    projectId: 'route-missing', stageId: 'delivery-gate', action: 'present', package: { summary: 's' },
+  }, context);
+  assert.equal(present.gateStatus, 'pending', '缺 acceptance-routing 块 → 放行(不阻断)');
+  const gateFile = await readFile(present.gatePath, 'utf8');
+  assert.ok(gateFile.includes('acceptance-routing 块缺失'), '呈递包应含观察行');
+  assert.ok(gateFile.includes('路由核对未执行'), '观察行应说明核对未执行');
+});
+
+test('delivery-gate present:缺 acceptance-routing 块(front-matter 无该键)→ 放行且呈递含观察行', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'delivery-flow', DELIVERY_STAGES);
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'Route NoKey', id: 'route-nokey', requirement: 'r', flowTemplate: 'delivery-flow' }, context);
+  await writeFile(join(workspace, 'route-nokey', 'SPEC.md'), '---\nfoo: bar\n---\n# SPEC\n正文', 'utf8');
+  await getTool(ctx, 'project_advance').execute({ projectId: 'route-nokey' }, context);
+  const present = await getTool(ctx, 'project_gate').execute({
+    projectId: 'route-nokey', stageId: 'delivery-gate', action: 'present', package: { summary: 's' },
+  }, context);
+  assert.equal(present.gateStatus, 'pending', 'front-matter 无 acceptance-routing 键 → 放行');
+  const gateFile = await readFile(present.gatePath, 'utf8');
+  assert.ok(gateFile.includes('acceptance-routing 块缺失'), '呈递包应含观察行');
+});
+
+test('delivery-gate present:错路由(trigger 类未声明 user-blocking)→ 拒绝呈递(AC1)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'delivery-flow', DELIVERY_STAGES);
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'Route Wrong', id: 'route-wrong', requirement: 'r', flowTemplate: 'delivery-flow' }, context);
+  await writeSpec(workspace, 'route-wrong', [
+    'AC1: model-verifiable',
+    'AC2: model-verifiable|real-session', // 错:trigger 类未声明 user-blocking
+  ]);
+  await getTool(ctx, 'project_advance').execute({ projectId: 'route-wrong' }, context);
+  await assert.rejects(
+    () => getTool(ctx, 'project_gate').execute({ projectId: 'route-wrong', stageId: 'delivery-gate', action: 'present', package: { summary: 's' } }, context),
+    /user-blocking/,
+    'trigger 类 route 非 user-blocking → 拒绝呈递',
+  );
+});
+
+test('delivery-gate present:SPEC.md 缺失 → 拒绝呈递', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'delivery-flow', DELIVERY_STAGES);
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_register').execute({ title: 'Route NoSpec', id: 'route-nospec', requirement: 'r', flowTemplate: 'delivery-flow' }, context);
+  await getTool(ctx, 'project_advance').execute({ projectId: 'route-nospec' }, context);
+  await assert.rejects(
+    () => getTool(ctx, 'project_gate').execute({ projectId: 'route-nospec', stageId: 'delivery-gate', action: 'present', package: { summary: 's' } }, context),
+    /SPEC\.md/,
+    'SPEC.md 缺失 → 拒绝呈递',
+  );
+});
+
+test('delivery-gate present:非 delivery-gate 门禁不受机械核对影响(回归)', async (t) => {
+  const { workspace, ctx, projectId } = await registerMini(t);
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_advance').execute({ projectId }, context); // → review(gate)
+  const present = await getTool(ctx, 'project_gate').execute({
+    projectId, stageId: 'review', action: 'present', package: { summary: 's' },
+  }, context);
+  assert.equal(present.gateStatus, 'pending', '非 delivery-gate 门禁照常呈递');
 });

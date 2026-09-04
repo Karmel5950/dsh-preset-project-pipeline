@@ -54,6 +54,15 @@
 //   - 观察读容错:readJsonRetry(瞬时半写读容错 registry-halfwrite-read-tolerance);
 //   - audit-rules 默认 meta(metaRuleChangeCooldownDays=30 / maxAutoProjectsPerAudit=2);
 //     只增不改、零 npm import。
+// 0.16.0 新增(验收路由前置化 kr-accept-route,2026-09-04):
+//   - ACCEPTANCE_TRIGGER_CLASSES(四类真机触发类:real-session/visual-browser/deploy-restart/
+//     real-upstream-credential)与 ACCEPTANCE_ROUTES(model-verifiable/user-blocking);
+//   - parseAcceptanceRouting(specText):解析 SPEC 头部 front-matter 的 acceptance-routing 块
+//     (结构化字段,机械核对更稳,不用 markdown 表 regex);缺 front-matter/缺块 → 带
+//     missing:true(块缺失,存量/未声明,delivery-gate 据此跳过核对不阻断);
+//   - validateAcceptanceRouting(entries):校验 AC 对照表路由声明——trigger ∈ 四类触发类时
+//     route 必须 user-blocking(r4 语义:真机项由用户侧 blocking 执行,不得以静态放行替代);
+//     只增不改、零 npm import。
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
@@ -2152,4 +2161,110 @@ export async function runObservations(ctx) {
     }
   }
   return { findings, errors };
+}
+
+// ── 验收路由前置化(kr-accept-route,0.16.0,2026-09-04)──────────────────────
+// 验收路由声明前置到 clarify:凡 AC 依赖真机会话/视觉浏览器验收/部署重启/真实上游凭据的,
+// clarify 阶段即声明「用户侧 blocking」,进 SPEC AC 对照表,delivery-gate 机械核对。
+// 机制承载:SPEC 头部 front-matter 的 acceptance-routing 结构化字段(主承载)+ flow 模板
+// note 增补 + MANUAL_TEXT 提示层 + delivery-gate present 机械核对(project-registry 调用本
+// 纯函数)。只增不改、零 npm import;纯函数便于单测(AC1/AC2 单测部分)。
+
+/** 四类真机触发类(AC 依赖这些 → 必须声明用户侧 blocking)。 */
+export const ACCEPTANCE_TRIGGER_CLASSES = ['real-session', 'visual-browser', 'deploy-restart', 'real-upstream-credential'];
+
+/** 合法验收路由(模型可验证 / 用户侧 blocking)。 */
+export const ACCEPTANCE_ROUTES = ['model-verifiable', 'user-blocking'];
+
+/**
+ * 解析 SPEC 头部 front-matter 的 acceptance-routing 块(结构化字段,机械核对更稳)。
+ * SPEC.md 顶部 `---` 分隔块内,格式:
+ *   ---
+ *   acceptance-routing:
+ *     AC1: model-verifiable
+ *     AC2: user-blocking|real-session
+ *   ---
+ * 每行 `AC-id: route` 或 `AC-id: route|trigger`(trigger 为四类触发类之一,可选)。
+ * 返回 { entries: [{ ac, route, trigger? }], error?, missing? }。缺 front-matter /
+ * 缺块 → 带 error + missing:true(块缺失,存量/未声明,delivery-gate 据此跳过核对);
+ * 未闭合 / 行格式非法 / 空块 → 带 error(块存在但畸形,delivery-gate 据此拒绝)。
+ * 不炸调用方。
+ */
+export function parseAcceptanceRouting(specText) {
+  if (typeof specText !== 'string' || specText.length === 0) {
+    return { entries: [], error: 'SPEC 文本为空' };
+  }
+  if (!specText.startsWith('---\n')) {
+    return { entries: [], error: 'SPEC 缺 front-matter(须以 --- 开头)', missing: true };
+  }
+  const end = specText.indexOf('\n---', 4);
+  if (end < 0) {
+    return { entries: [], error: 'SPEC front-matter 未闭合(缺 --- 结束)' };
+  }
+  const block = specText.slice(4, end);
+  const lines = block.split('\n');
+  const routingIdx = lines.findIndex((l) => /^\s*acceptance-routing\s*:\s*$/.test(l));
+  if (routingIdx < 0) {
+    return { entries: [], error: 'SPEC front-matter 缺 acceptance-routing 块', missing: true };
+  }
+  const entries = [];
+  for (let i = routingIdx + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*$/.test(line)) continue;
+    if (!/^\s+/.test(line)) break; // 缩进结束(下一顶层键)
+    const m = /^\s*([A-Za-z0-9_-]+)\s*:\s*([A-Za-z0-9_-]+)(?:\s*\|\s*([A-Za-z0-9_-]+))?\s*$/.exec(line);
+    if (!m) {
+      return { entries: [], error: `acceptance-routing 行格式非法:${line.trim()}` };
+    }
+    const entry = { ac: m[1], route: m[2] };
+    if (m[3]) entry.trigger = m[3];
+    entries.push(entry);
+  }
+  if (entries.length === 0) {
+    return { entries: [], error: 'acceptance-routing 块为空(无 AC 条目)' };
+  }
+  return { entries };
+}
+
+/**
+ * 校验 AC 对照表路由声明(纯函数,AC1/AC2 单测锁定)。
+ * entries: [{ ac, route, trigger? }](经 parseAcceptanceRouting 或手工构造)。
+ * 规则:
+ *   - 每项 ac 非空、route ∈ ACCEPTANCE_ROUTES;
+ *   - trigger ∈ 四类触发类时 route 必须 'user-blocking'(r4 语义:真机项由用户侧
+ *     blocking 执行,不得以静态放行替代);
+ *   - 无 trigger(模型可验证)route 可为 model-verifiable 或 user-blocking。
+ * 返回 { ok: true, errors: [] } 或 { ok: false, errors: string[] }。
+ */
+export function validateAcceptanceRouting(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return { ok: false, errors: ['acceptance-routing 必须是非空数组'] };
+  }
+  const errors = [];
+  for (let i = 0; i < entries.length; i++) {
+    const e = entries[i];
+    const at = `acceptance-routing[${i}]`;
+    if (e === null || typeof e !== 'object') {
+      errors.push(`${at} 必须是对象`);
+      continue;
+    }
+    if (typeof e.ac !== 'string' || e.ac.length === 0) {
+      errors.push(`${at}.ac 必填(非空字符串)`);
+      continue;
+    }
+    if (!ACCEPTANCE_ROUTES.includes(e.route)) {
+      errors.push(`${at}(${e.ac}) route 必须是 ${ACCEPTANCE_ROUTES.join('/')} 之一,得到 ${JSON.stringify(e.route)}`);
+      continue;
+    }
+    if (e.trigger !== undefined) {
+      if (!ACCEPTANCE_TRIGGER_CLASSES.includes(e.trigger)) {
+        errors.push(`${at}(${e.ac}) trigger 必须是 ${ACCEPTANCE_TRIGGER_CLASSES.join('/')} 之一,得到 ${JSON.stringify(e.trigger)}`);
+        continue;
+      }
+      if (e.route !== 'user-blocking') {
+        errors.push(`${at}(${e.ac}) 依赖真机触发类 "${e.trigger}",route 必须声明 user-blocking(r4:真机项由用户侧 blocking 执行,不得以静态放行替代)`);
+      }
+    }
+  }
+  return errors.length === 0 ? { ok: true, errors: [] } : { ok: false, errors };
 }

@@ -2,6 +2,23 @@
 
 本 preset 的全部显著变更记录在此文件。
 
+## [0.16.0] - 2026-09-04
+
+验收路由前置化(kr-accept-route 交付;背景:同类 test-env/acceptance-capability 卡点「流水线角色无真实会话/主线程手段,真机验证须用户侧 blocking」已重复 ≥5 次,每次重新裁决一个恒定答案(r4),且发现时机不稳定——早则 clarify、晚则 build 后期返工一整轮)。
+
+- **验收路由声明前置到 clarify**:凡 AC 依赖真机会话 / 视觉浏览器验收 / 部署重启 / 真实上游凭据的,clarify 阶段即声明「用户侧 blocking」,进 SPEC AC 对照表,delivery-gate 机械核对,不再依赖中途卡点上报与事后引用裁决。
+- **project-lib 只增不改(零 npm import)**:
+  - `ACCEPTANCE_TRIGGER_CLASSES`(四类真机触发类:real-session/visual-browser/deploy-restart/real-upstream-credential)与 `ACCEPTANCE_ROUTES`(model-verifiable/user-blocking)。
+  - `parseAcceptanceRouting(specText)`:解析 SPEC 头部 front-matter 的 `acceptance-routing` 结构化字段(每行 `AC-id: route` 或 `AC-id: route|trigger`;结构化字段机械核对更稳,不用 markdown 表 regex)。
+  - `validateAcceptanceRouting(entries)`:校验 AC 对照表路由声明——trigger ∈ 四类触发类时 route 必须 user-blocking(r4 语义:真机项由用户侧 blocking 执行,不得以静态放行替代)。
+- **delivery-gate 机械核对(project-registry)**:delivery-gate present 时读 SPEC.md 解析 acceptance-routing,调 `validateAcceptanceRouting` 校验;缺声明 / 错路由(trigger 类未声明 user-blocking)→ 拒绝呈递。非 delivery-gate 门禁不受影响。
+- **flow 模板 note 增补**:standard-flow / iteration-flow 的 clarify 与 delivery-gate 阶段 note 增补 acceptance-routing 要求(模板仅影响新项目,存量零影响)。
+- **MANUAL_TEXT 增「验收路由前置化」小节** + 工具速查/工具 description 补 delivery-gate 机械核对句(文本不含 {{template}} 变量,prompt-render-template-var-guard)。
+- 版本 0.15.0 → **0.16.0(minor)**:验收路由前置化机制 = 能力新增。
+- 测试:project-lib 增 `parseAcceptanceRouting`/`validateAcceptanceRouting` 单测(四类触发类各一 happy path、缺声明/错路由拒绝、解析非法拒绝);project-registry 增 delivery-gate 机械核对单测(合法 SPEC 通过 / 缺 acceptance-routing 拒绝 / 错路由拒绝 / 非 delivery-gate 不受影响);prompt-render 增 MANUAL_TEXT 含「验收路由前置化」断言。覆盖仓库全部相关测试文件(selftest-must-cover-repo-test-files),新增逻辑分支均有 happy path 测试(test-coverage-happy-path)。
+- **AC2 真机 + AC5 见证(r4)**:部署后真实项目 clarify 产出 AC 对照表、delivery-gate 机械核对,由用户侧 blocking 执行;流水线只做单测/静态核对。
+- 触点:presets/project-pipeline/(project-lib.mjs、project-registry.mjs、flows/、test/、package.json)+ pipeline-ws/.dsh-library/flows/lite-flow.json → **r2 交付 deliverables/ + APPLY.md** + **r3 deploy 至 IN SYNC + 重启**(重启窗口并入攒批)。
+
 ## [0.15.0] - 2026-09-03
 
 自省审计回路:非用户需求的自我优化第一版(kr-self-audit 交付;背景:用户战略批评"watcher 五代全部用户驱动,流水线零自主优化",第一代"非用户需求的自我优化"由观察 → 规则表判定 → 三档分流实现,闭环仍走完整流水线,门禁停摆是用户否决点)。

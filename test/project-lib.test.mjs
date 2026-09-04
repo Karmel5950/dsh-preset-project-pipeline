@@ -56,6 +56,10 @@ import {
   territoryInWhitelist,
   validateAuditRules,
   whenMatches,
+  ACCEPTANCE_ROUTES,
+  ACCEPTANCE_TRIGGER_CLASSES,
+  parseAcceptanceRouting,
+  validateAcceptanceRouting,
 } from '../plugins/project-lib.mjs';
 
 // ── 桩具 ────────────────────────────────────────────────────────────────────
@@ -751,5 +755,89 @@ test('buildF3Payload:F3 直改动作 + trace(before/after/evidence)(AC3)', () =>
   assert.equal(p.trace.action, 'F3');
   assert.equal(p.trace.after.count, 4);
   assert.equal(p.trace.result, null);
+});
+
+// ── 验收路由前置化(0.16.0,kr-accept-route):parseAcceptanceRouting / validateAcceptanceRouting ──
+
+test('ACCEPTANCE_TRIGGER_CLASSES / ACCEPTANCE_ROUTES 常量钉死(四类真机触发类 + 两路由)', () => {
+  assert.deepEqual(ACCEPTANCE_TRIGGER_CLASSES, ['real-session', 'visual-browser', 'deploy-restart', 'real-upstream-credential']);
+  assert.deepEqual(ACCEPTANCE_ROUTES, ['model-verifiable', 'user-blocking']);
+});
+
+test('parseAcceptanceRouting:解析 SPEC front-matter 的 acceptance-routing 块(AC1 happy path)', () => {
+  const spec = `---
+acceptance-routing:
+  AC1: model-verifiable
+  AC2: user-blocking|real-session
+  AC3: user-blocking|visual-browser
+  AC4: user-blocking|deploy-restart
+  AC5: user-blocking|real-upstream-credential
+---
+# SPEC
+正文...`;
+  const parsed = parseAcceptanceRouting(spec);
+  assert.equal(parsed.error, undefined);
+  assert.equal(parsed.entries.length, 5);
+  assert.deepEqual(parsed.entries[0], { ac: 'AC1', route: 'model-verifiable' });
+  assert.deepEqual(parsed.entries[1], { ac: 'AC2', route: 'user-blocking', trigger: 'real-session' });
+  assert.deepEqual(parsed.entries[4], { ac: 'AC5', route: 'user-blocking', trigger: 'real-upstream-credential' });
+});
+
+test('parseAcceptanceRouting:缺 front-matter / 缺块 / 未闭合 / 行格式非法 / 空块 → error(不炸)', () => {
+  assert.ok(parseAcceptanceRouting('').error, '空文本');
+  assert.ok(parseAcceptanceRouting('# 无 front-matter').error, '缺 front-matter');
+  assert.ok(parseAcceptanceRouting('---\nfoo: bar\n').error, '缺 acceptance-routing 块');
+  assert.ok(parseAcceptanceRouting('---\nacceptance-routing:\n  AC1: model-verifiable').error, '未闭合');
+  assert.ok(parseAcceptanceRouting('---\nacceptance-routing:\n---').error, '空块');
+  // 块缺失(存量/未声明)带 missing:true;块存在但畸形不带 missing(严格校验)。
+  assert.equal(parseAcceptanceRouting('# 无 front-matter').missing, true, '缺 front-matter → missing');
+  assert.equal(parseAcceptanceRouting('---\nfoo: bar\n---\n# SPEC').missing, true, '缺 acceptance-routing 键 → missing');
+  assert.equal(parseAcceptanceRouting('---\nacceptance-routing:\n  AC1: model-verifiable').missing, undefined, '未闭合 → 非 missing(畸形)');
+  assert.equal(parseAcceptanceRouting('---\nacceptance-routing:\n---').missing, undefined, '空块 → 非 missing(畸形)');
+  // trigger 非法属 validate 层(parse 只解析行格式,route|trigger 格式合法即通过)。
+  const parsedBadTrigger = parseAcceptanceRouting('---\nacceptance-routing:\n  AC1: model-verifiable|bad-trigger\n---');
+  assert.equal(parsedBadTrigger.error, undefined, '行格式合法(route|trigger)');
+  assert.equal(parsedBadTrigger.entries[0].trigger, 'bad-trigger', 'trigger 原样解析,由 validate 层拒绝');
+  // 行格式非法:route 含非法字符。
+  const badLine = '---\nacceptance-routing:\n  AC1: model verifiable\n---';
+  assert.ok(parseAcceptanceRouting(badLine).error, '行格式非法(route 含空格)');
+});
+
+test('validateAcceptanceRouting:四类真机触发类各一 happy path(声明 user-blocking → 通过)(AC2 单测)', () => {
+  const entries = [
+    { ac: 'AC1', route: 'model-verifiable' },
+    { ac: 'AC2', route: 'user-blocking', trigger: 'real-session' },
+    { ac: 'AC3', route: 'user-blocking', trigger: 'visual-browser' },
+    { ac: 'AC4', route: 'user-blocking', trigger: 'deploy-restart' },
+    { ac: 'AC5', route: 'user-blocking', trigger: 'real-upstream-credential' },
+  ];
+  const checked = validateAcceptanceRouting(entries);
+  assert.equal(checked.ok, true, '四类触发类声明 user-blocking → 通过');
+  assert.deepEqual(checked.errors, []);
+});
+
+test('validateAcceptanceRouting:缺声明 / 错路由 → 拒绝(AC1)', () => {
+  // 缺声明:trigger 类未声明 user-blocking(route=model-verifiable)→ 拒绝。
+  const wrongRoute = validateAcceptanceRouting([
+    { ac: 'AC2', route: 'model-verifiable', trigger: 'real-session' },
+  ]);
+  assert.equal(wrongRoute.ok, false, 'trigger 类 route 非 user-blocking → 拒绝');
+  assert.ok(wrongRoute.errors[0].includes('user-blocking'), '错误信息提示须声明 user-blocking');
+  // 非法 route。
+  const badRoute = validateAcceptanceRouting([{ ac: 'AC1', route: 'static-check' }]);
+  assert.equal(badRoute.ok, false, '非法 route → 拒绝');
+  // 非法 trigger。
+  const badTrigger = validateAcceptanceRouting([{ ac: 'AC1', route: 'user-blocking', trigger: 'nope' }]);
+  assert.equal(badTrigger.ok, false, '非法 trigger → 拒绝');
+  // 缺 ac / 非对象 / 空数组。
+  assert.equal(validateAcceptanceRouting([{ route: 'model-verifiable' }]).ok, false, '缺 ac → 拒绝');
+  assert.equal(validateAcceptanceRouting([null]).ok, false, '非对象 → 拒绝');
+  assert.equal(validateAcceptanceRouting([]).ok, false, '空数组 → 拒绝');
+  assert.equal(validateAcceptanceRouting(null).ok, false, 'null → 拒绝');
+});
+
+test('validateAcceptanceRouting:无 trigger(模型可验证)route 可为 model-verifiable 或 user-blocking', () => {
+  assert.equal(validateAcceptanceRouting([{ ac: 'AC1', route: 'model-verifiable' }]).ok, true);
+  assert.equal(validateAcceptanceRouting([{ ac: 'AC1', route: 'user-blocking' }]).ok, true, '无 trigger 也可声明 user-blocking(用户主动)');
 });
 

@@ -3,7 +3,7 @@
   "id": "standard-flow",
   "version": 1,
   "stages": [
-    { "id": "clarify", "type": "work", "role": "product", "produces": ["SPEC.md"], "note": "需求澄清 + 并行五维可行性分析(设计信息完备/开发复杂度/测试环境数据/部署权限/验收者能力),入 SPEC 专章;任一维度有条件/不可行 → project_block 上报" },
+    { "id": "clarify", "type": "work", "role": "product", "produces": ["SPEC.md"], "note": "需求澄清 + 并行五维可行性分析(设计信息完备/开发复杂度/测试环境数据/部署权限/验收者能力),入 SPEC 专章;任一维度有条件/不可行 → project_block 上报;SPEC 头部 front-matter 含 acceptance-routing 块(AC 对照表路由声明,四类真机触发类 real-session/visual-browser/deploy-restart/real-upstream-credential 声明 user-blocking)" },
     { "id": "spec-gate", "type": "gate", "title": "需求规格确认", "present": ["SPEC.md"] },
     { "id": "design", "type": "work", "role": "architect", "produces": ["DESIGN.md"] },
     { "id": "mid-summary", "type": "summary" },
@@ -11,7 +11,7 @@
     { "id": "build", "type": "work", "role": "dev", "produces": ["code"] },
     { "id": "test", "type": "work", "role": "tester" },
     { "id": "accept", "type": "work", "role": "product", "note": "代用户首轮验收:按 SPEC 验收标准逐条核对,不过打回 build 内部返工;凡影响判定却无法真实验证的项(浏览器视觉/真实上游等)必须 project_block 上报等裁决,禁止以静态检查替代放行" },
-    { "id": "delivery-gate", "type": "gate", "title": "交付验收", "present": ["DELIVERY.md"] },
+    { "id": "delivery-gate", "type": "gate", "title": "交付验收", "present": ["DELIVERY.md"], "note": "机械核对 AC 对照表路由声明(读 SPEC.md acceptance-routing;声明是纪律引导,核对只校验已声明项——块存在 → 四类真机触发类须声明 user-blocking,非法拒绝;块缺失(存量/未声明)→ 不拒绝,呈递包加观察行);含视觉/真实环境等无法模型验证的项须在此前列为用户侧 blocking" },
     { "id": "wrap", "type": "summary" },
     { "id": "harvest", "type": "internalize", "note": "内化收割。P4:调 project_harvest rebuild-index 重建 lessons-index.json(消费路由索引,保留 hits);按需 bump-hits;追加 .dsh-library/ 可复用资产(角色/流程变体/教训)" }
   ]

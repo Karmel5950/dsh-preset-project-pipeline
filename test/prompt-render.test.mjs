@@ -43,6 +43,10 @@ test('AC7-① mock ctx 捕获 project-pipeline/manual section 与工具注册清
   assert.ok(manual, '应注册 project-pipeline/manual section');
   assert.equal(typeof manual.text, 'string');
   assert.ok(manual.text.length > 0, 'MANUAL_TEXT 非空');
+  // AC4(0.16.0):MANUAL_TEXT 含「验收路由前置化」小节,且不含 {{template}} 变量(prompt-render-template-var-guard)。
+  assert.ok(manual.text.includes('验收路由前置化'), 'MANUAL_TEXT 应含「验收路由前置化」小节');
+  assert.ok(manual.text.includes('acceptance-routing'), 'MANUAL_TEXT 应含 acceptance-routing 结构化字段说明');
+  assert.ok(!/{{[a-zA-Z0-9_-]+}}/.test(manual.text), 'MANUAL_TEXT 不应含 {{template}} 变量(防误解析)');
   const toolNames = tools.map((t) => t.name).sort();
   // 登记簿 7 工具(register/advance/gate/budget/status/block/harvest)。
   for (const expected of ['project_register', 'project_advance', 'project_gate', 'project_budget', 'project_status', 'project_block', 'project_harvest']) {
