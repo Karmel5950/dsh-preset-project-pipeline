@@ -1598,7 +1598,7 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
       const open = list.filter((e) => e?.status !== 'resolved');
       return {
         action: 'status',
-        lastRunAt: list.length > 0 ? list[list.length - 1].ts ?? null : null,
+        lastRunAt: list.length > 0 ? list[list.length - 1].ts ?? '' : '',
         openFindings: open.length,
         trailCount: list.length,
         trail: list.slice(-20),
@@ -2042,7 +2042,7 @@ const AUDIT_OUTPUT_SCHEMA = {
     action: { type: 'string', enum: ['run', 'status'] },
     status: { type: 'string' },
     error: { type: 'string' },
-    lastRunAt: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+    lastRunAt: { type: 'string', description: 'ISO 时间戳;从未运行时为空串' },
     openFindings: { type: 'integer' },
     trailCount: { type: 'integer' },
     trail: { type: 'array' },
