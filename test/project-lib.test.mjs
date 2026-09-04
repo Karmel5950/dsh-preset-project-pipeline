@@ -39,6 +39,23 @@ import {
   validateReadings,
   validateRulings,
   writeJson,
+  DEFAULT_AUDIT_META,
+  auditDedupe,
+  auditRateLimit,
+  auditRuleEngine,
+  auditRulesPath,
+  auditTerritoryWhitelist,
+  auditTrailPath,
+  buildF1Payload,
+  buildF2Payload,
+  buildF3Payload,
+  evidenceChain,
+  readAuditRules,
+  readAuditTrail,
+  readJsonRetry,
+  territoryInWhitelist,
+  validateAuditRules,
+  whenMatches,
 } from '../plugins/project-lib.mjs';
 
 // ── 桩具 ────────────────────────────────────────────────────────────────────
@@ -574,3 +591,165 @@ test('aggregateByModel:按 model 分组聚合;未知/缺省桶归 unknown', () =
   assert.equal(byModel.unknown.totalToken, 2, '缺 model 归 unknown');
   assert.equal(byModel.unknown.entries, 1);
 });
+
+// ── 自省审计回路 · 纯函数(0.15.0,kr-self-audit)───────────────────────────
+
+const AUDIT_RULE = (over = {}) => ({
+  id: 'R-test',
+  observe: 'O4',
+  when: { categoryCountGte: 3 },
+  act: 'F2',
+  object: 'data-asset',
+  dedupe: 'by-category',
+  territory: 'pipeline-ws/.dsh-library/lessons',
+  ...over,
+});
+
+const AUDIT_FINDING = (over = {}) => ({
+  id: 'O4-cat-x',
+  observe: 'O4',
+  category: 'dev-complexity',
+  title: '同类 lesson 堆积:dev-complexity',
+  summary: 'dev-complexity category 有 4 篇',
+  value: { categoryCount: 4, category: 'dev-complexity' },
+  status: 'supported',
+  evidence: [{ file: '.dsh-library/lessons-index.json', ref: 'entry=a' }],
+  ...over,
+});
+
+test('validateAuditRules:合法规则表通过;act=F4/非法/缺字段拒绝(AC1)', () => {
+  const okRules = { schemaVersion: 1, meta: DEFAULT_AUDIT_META, rules: [AUDIT_RULE()] };
+  assert.equal(validateAuditRules(okRules).ok, true);
+  // act:F4 永久禁区
+  assert.equal(validateAuditRules({ schemaVersion: 1, rules: [AUDIT_RULE({ act: 'F4' })] }).ok, false, 'act:F4 拒绝');
+  assert.equal(validateAuditRules({ schemaVersion: 1, rules: [AUDIT_RULE({ act: 'X' })] }).ok, false, 'actX 拒绝');
+  // 缺 when
+  const noWhen = AUDIT_RULE();
+  delete noWhen.when;
+  assert.equal(validateAuditRules({ schemaVersion: 1, rules: [noWhen] }).ok, false, '缺 when');
+  // 重复 id
+  assert.equal(validateAuditRules({ schemaVersion: 1, rules: [AUDIT_RULE(), AUDIT_RULE()] }).ok, false, '重复 id');
+  // 未知键
+  assert.equal(validateAuditRules({ schemaVersion: 1, rules: [AUDIT_RULE({ wat: 1 })] }).ok, false, '规则未知键');
+});
+
+test('auditTerritoryWhitelist/territoryInWhitelist:领地白名单硬边界', () => {
+  const whitelist = auditTerritoryWhitelist();
+  assert.ok(Array.isArray(whitelist) && whitelist.includes('pipeline-ws'));
+  assert.equal(territoryInWhitelist('pipeline-ws/.dsh-library/lessons'), true);
+  assert.equal(territoryInWhitelist('plugindev/toolkit'), true);
+  assert.equal(territoryInWhitelist('pipeline-ws/.dsh-base/foo'), true);
+  assert.equal(territoryInWhitelist('outside/secret'), false, '领地外 false');
+  assert.equal(territoryInWhitelist(''), false);
+});
+
+test('whenMatches:谓词求值(Gte/Gt/Lt/Contains/未知键跳过)', () => {
+  assert.equal(whenMatches({ categoryCountGte: 3 }, { categoryCount: 4 }), true);
+  assert.equal(whenMatches({ categoryCountGte: 3 }, { categoryCount: 2 }), false);
+  assert.equal(whenMatches({ pendingHoursGte: 4 }, { pendingHours: 6 }), true);
+  assert.equal(whenMatches({ driftCountGt: 1 }, { driftCount: 1 }), false, 'Gt 不包含等号');
+  assert.equal(whenMatches({ tagsContains: 'x' }, { tags: ['a', 'x'] }), true, 'Contains');
+  assert.equal(whenMatches({ unknownKeyGte: 1 }, { categoryCount: 2 }), false, 'value 无该 key 不命中');
+});
+
+test('auditRuleEngine:规则 act:F4 或对 F1 客体升权 F2 → 拒绝报错(AC1)', () => {
+  assert.throws(
+    () => auditRuleEngine([AUDIT_FINDING()], [AUDIT_RULE({ act: 'F2', object: 'flow' })]),
+    /升权 F2/,
+    'flow 客体升权 F2 拒绝',
+  );
+  assert.throws(
+    () => auditRuleEngine([AUDIT_FINDING()], [AUDIT_RULE({ act: 'F2', object: 'role-prompt' })]),
+    /升权 F2/,
+    'role-prompt 客体升权 F2 拒绝',
+  );
+  assert.throws(
+    () => auditRuleEngine([AUDIT_FINDING()], [AUDIT_RULE({ act: 'F3', object: 'preset-source' })]),
+    /永久禁区/,
+    'preset-source 以 F3 触及永久禁区拒绝',
+  );
+});
+
+test('auditRuleEngine:happy path 产分流动作;领地外 F2 降级 F1', () => {
+  const { actions, downgrades } = auditRuleEngine([AUDIT_FINDING()], [AUDIT_RULE()]);
+  assert.equal(actions.length, 1);
+  assert.equal(actions[0].act, 'F2');
+  assert.equal(actions[0].territory, 'pipeline-ws/.dsh-library/lessons');
+  assert.equal(downgrades.length, 0);
+  // 领地外 territory → F2 降级 F1
+  const { actions: outA, downgrades: outD } = auditRuleEngine([AUDIT_FINDING()], [AUDIT_RULE({ territory: 'outside/secret' })]);
+  assert.equal(outA.length, 1);
+  assert.equal(outA[0].act, 'F1', '领地外降级 F1');
+  assert.equal(outA[0].downgraded, true);
+  assert.equal(outD.length, 1);
+  // 未命中 when → 无动作
+  const { actions: none } = auditRuleEngine([AUDIT_FINDING({ value: { categoryCount: 1 } })], [AUDIT_RULE()]);
+  assert.equal(none.length, 0);
+});
+
+test('auditDedupe:by-category/by-target 去重(在跑项目/未解决审计产出)', () => {
+  const actByCat = { ...AUDIT_RULE(), ruleId: 'r1', act: 'F2', category: 'dev-complexity' };
+  const actByTgt = { ...AUDIT_RULE(), ruleId: 'r2', act: 'F2', dedupe: 'by-target', object: 'toolkit-readme', territory: 'plugindev/toolkit' };
+  // 无在跑项目 → 全保留
+  const d1 = auditDedupe([actByCat, actByTgt], [], []);
+  assert.equal(d1.kept.length, 2);
+  // 在跑项目 title 含 category → by-category 去重
+  const d2 = auditDedupe([actByCat], [{ id: 'p1', title: 'dev-complexity 优化' }], []);
+  assert.equal(d2.kept.length, 0);
+  assert.equal(d2.dropped.length, 1);
+  // 未解决 audit-trail 同 target → by-target 去重
+  const d3 = auditDedupe([actByTgt], [], [{ id: 't1', action: 'F2', object: 'toolkit-readme', status: 'registered' }]);
+  assert.equal(d3.kept.length, 0);
+  assert.equal(d3.dropped[0].reason.includes('by-target'), true);
+});
+
+test('auditRateLimit:F2 上限与 meta 冷却期(AC4)', () => {
+  const mkF2 = (n) => ({ ruleId: `r${n}`, act: 'F2', meta: false });
+  const mkMeta = (n) => ({ ruleId: `meta${n}`, act: 'F2', meta: true });
+  // 4 个 F2 → 上限 2 截断
+  const r = auditRateLimit([mkF2(1), mkF2(2), mkF2(3), mkF2(4)], DEFAULT_AUDIT_META);
+  assert.equal(r.kept.length, 2);
+  assert.equal(r.dropped.length, 2);
+  assert.equal(r.dropped[0].reason.includes('上限'), true);
+  // meta 冷却期激活:lastMetaActionAt 近值 → meta 类动作全部不执行(防自指风暴)。
+  const metaCool = auditRateLimit([mkMeta(1), mkMeta(2)], { ...DEFAULT_AUDIT_META, lastMetaActionAt: new Date(Date.now() - 86400000).toISOString() });
+  assert.equal(metaCool.kept.length, 0, '冷却期内 meta 不执行');
+  assert.equal(metaCool.dropped.length, 2);
+  // 无冷却(超期)→ meta 每次至多一条。
+  const metaCap = auditRateLimit([mkMeta(1), mkMeta(2)], { ...DEFAULT_AUDIT_META, lastMetaActionAt: new Date(Date.now() - 40 * 86400000).toISOString() });
+  assert.equal(metaCap.kept.length, 1, '每次审计至多一条 meta');
+  assert.equal(metaCap.dropped.length, 1);
+});
+
+test('buildF2Payload:title 前缀「自省立项」+ reason 证据链 + auto:true(AC2)', () => {
+  const p = buildF2Payload(AUDIT_FINDING(), AUDIT_RULE());
+  assert.match(p.title, /^自省立项: /, 'title 前缀');
+  assert.equal(p.auto, true);
+  assert.match(p.reason, /证据链:/);
+  assert.match(p.reason, /lessons-index\.json#entry=a/, 'evidence 链可回放');
+  assert.equal(p.ruleId, 'R-test');
+  assert.equal(p.findingId, 'O4-cat-x');
+  assert.equal(evidenceChain(AUDIT_FINDING().evidence), '.dsh-library/lessons-index.json#entry=a');
+});
+
+test('buildF1Payload:F1 报告含发现+evidence+建议(AC3)', () => {
+  const p = buildF1Payload(AUDIT_FINDING(), AUDIT_RULE({ recommendation: '核查门禁停摆' }));
+  assert.equal(p.act, 'F1');
+  assert.match(p.report, /同类 lesson 堆积/);
+  assert.match(p.report, /lessons-index\.json#entry=a/, 'evidence 入报告');
+  assert.match(p.report, /核查门禁停摆/, '建议入报告');
+  assert.deepEqual(p.evidence, AUDIT_FINDING().evidence);
+});
+
+test('buildF3Payload:F3 直改动作 + trace(before/after/evidence)(AC3)', () => {
+  const p = buildF3Payload(AUDIT_FINDING(), AUDIT_RULE(), { object: '.dsh-library/lessons-index.json', before: { count: 3 }, after: { count: 4 } });
+  assert.equal(p.act, 'F3');
+  assert.equal(p.object, '.dsh-library/lessons-index.json');
+  assert.equal(p.before.count, 3);
+  assert.equal(p.after.count, 4);
+  assert.ok(p.trace.id && p.trace.ts, 'trace 有 id/ts');
+  assert.equal(p.trace.action, 'F3');
+  assert.equal(p.trace.after.count, 4);
+  assert.equal(p.trace.result, null);
+});
+

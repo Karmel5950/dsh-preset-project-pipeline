@@ -2,6 +2,23 @@
 
 本 preset 的全部显著变更记录在此文件。
 
+## [0.15.0] - 2026-09-03
+
+自省审计回路:非用户需求的自我优化第一版(kr-self-audit 交付;背景:用户战略批评"watcher 五代全部用户驱动,流水线零自主优化",第一代"非用户需求的自我优化"由观察 → 规则表判定 → 三档分流实现,闭环仍走完整流水线,门禁停摆是用户否决点)。
+
+- **project-lib 只增不改(零 npm import)**:
+  - 观察原语 O1~O6 纯函数:O1 watcher 日志(路径经 `DEFAULT_WATCH_LOG` + plugindevRoot 推导,现环境 `plugindev/pipeline-watch.log` 可得;退出频次/事件分布/WS 断连/静默断链;全不可得 → `status:'unsupported'` 兜底)/ O2 BUDGET.runtime-events token 分布与异常 / O3 REGISTRY 门禁 pending 时长 + blockers category 频次(复用 `collectAllBlockers`/`aggregateByCategory`)/ O4 lessons-index 同类 category 计数(≥3 = 机制缺陷未修候选)/ O5 toolkit 实文件 vs 文档差集(含 deprecated)/ O6 audit-trail 前次发现状态;每条发现带 evidence(文件路径+行/条目/时间戳,可回放)。
+  - 规则表引擎:`validateAuditRules`(schema 校验,act∈F1/F2/F3)/ `auditTerritoryWhitelist`(领地白名单硬边界)/ `auditRuleEngine`(匹配规则产分流动作;规则表含 act:F4 或对 F1 客体(flow/角色提示词)升权 F2 → 引擎拒绝报错=AC1)/ `auditDedupe`(by-category/by-target)/ `auditRateLimit`(F2 上限 2 + meta 冷却期 30 天 + 至多一条)。
+  - 分流 payload:`buildF2Payload`(title 前缀「自省立项」+ reason evidence 链 + auto:true)/ `buildF1Payload`(发现+evidence+建议)/ `buildF3Payload`(直改动作+before+after+evidence)。
+  - 观察读容错:`readJsonRetry`(瞬时半写读容错 registry-halfwrite-read-tolerance)。
+- **project_audit 独立工具**:action=run(观察 → 引擎 → 去重限频 → 三档分流;F2 走 `project_register` auto:true / F1 呈递报告 / F3 直改留痕)/ action=status(查审计留痕);写 `.dsh-library/audit-trail.json`(append-only)。触发 = harvest 顺带(结项后跑一轮)+ 手动入口。
+- **audit-rules.json**(workspace 级,规则归用户):初始三条示例规则 R-lesson-storm(act:F2)/ R-gate-slow(act:F1)/ R-doc-drift(act:F2)+ meta 段(`metaRuleChangeCooldownDays:30 / maxAutoProjectsPerAudit:2 / lastMetaActionAt:null`)。
+- **MANUAL_TEXT 增「自省审计回路」小节** + 工具速查补 project_audit 条目(文本不含 {{template}} 变量,prompt-render-template-var-guard)。
+- 版本 0.14.0 → **0.15.0(minor)**:新工具 + 观察原语 + 规则引擎 = 能力新增。
+- 测试:新增 `test/project-audit.test.mjs`(AC1/AC4 及 AC2/AC3 单测部分:payload 形状、证据链可回放性、去重限频、领地硬边界 act:F4/升权 F2 拒绝、O1~O6 happy path)+ `project-lib.test.mjs`/`project-registry.test.mjs` 同步增补;覆盖仓库全部相关测试文件(selftest-must-cover-repo-test-files),新增逻辑分支均有 happy path 测试(test-coverage-happy-path)。
+- **AC2/AC3 真机 + AC5 见证(r4)**:真实会话观察自动立项/呈递/直改,以及无人工输入窗内自主立项一单,由用户侧 blocking 执行;O1 须以 supported 状态运行产出真实发现(现环境日志可得,不得以 unsupported 交差)。
+- 触点:presets/project-pipeline/(project-lib.mjs、project-registry.mjs、test/、package.json)+ pipeline-ws/.dsh-library/audit-rules.json → **r2 交付 deliverables/ + APPLY.md** + **r3 deploy 至 IN SYNC + 重启**(重启窗口并入攒批)。
+
 ## [0.14.0] - 2026-09-03
 
 parked 退出通道:暂存项目可取消(kr-parked-exit 交付;背景:kr-entity-mutex 真机验证中探针 parked 后无法 reject 终止,「parked 进得去出不来」,登记纪律「探针类 parked:true + 验证后 reject 终止」兑现不了)。

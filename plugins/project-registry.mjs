@@ -69,6 +69,11 @@
 //     建议以 parked:true 排队;parked 登记回执/激活回执带 entityConflict 冲突信号.
 //   - REGISTER_OUTPUT_SCHEMA/ADVANCE_OUTPUT_SCHEMA 增 entityConflict(可选);
 //   - MANUAL_TEXT「资源触点互斥声明」「暂存区 parked 语义」补 entity 维度句.
+// 0.15.0 新增(自省审计回路 kr-self-audit,2026-09-03):
+//   - 新增独立 project_audit 工具(action=run/status):观察 → 规则表引擎 → 去重限频 → 三档分流
+//     (F2 走 project_register auto:true / F1 呈递 payload / F3 直改留痕),写 .dsh-library/audit-trail.json
+//     append-only;领地白名单硬校验(规则表 act:F4 / 对 F1 客体升权 F2 → 引擎拒绝报错=AC1)。
+//   - MANUAL_TEXT 增「自省审计回路」小节 + 工具速查补 project_audit 条目。
 
 import { existsSync, readFileSync } from 'node:fs';
 import { appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
@@ -100,6 +105,20 @@ import {
   validateLessonEntry,
   validateLessonsIndex,
   writeJson,
+  auditDedupe,
+  auditRateLimit,
+  auditRuleEngine,
+  auditTrailPath,
+  applyF3DirectEdit,
+  buildF1Payload,
+  buildF2Payload,
+  buildF3Payload,
+  evidenceChain,
+  readAuditRules,
+  readAuditTrail,
+  readJsonRetry,
+  runObservations,
+  validateAuditRules,
 } from './project-lib.mjs';
 
 export const name = 'project-pipeline-registry';
@@ -1553,7 +1572,178 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
     throw new Error(`${name}/project_harvest: action 必须是 rebuild-index/bump-hits,得到 ${JSON.stringify(args?.action ?? null)}`);
   }
 
-  return { register, advance, gate, budget, status, block, harvest };
+  // 8. project_audit ───────────────────────────────────────────────────────
+  // 自省审计回路(kr-self-audit,0.15.0):观察 → 规则表判定 → 去重限频 → 三档分流(F2 register /
+  // F1 呈递 / F3 直改留痕),写 .dsh-library/audit-trail.json append-only。领地白名单硬校验
+  // (规则表 act:F4 / 对 F1 客体升权 F2 → 引擎拒绝报错=AC1)。观察读容错(registry-halfwrite-read-tolerance)。
+  async function readToolkitDocs(toolkitDir) {
+    let text = '';
+    for (const name of ['README.md', 'PROTOCOL.md', 'SKILL.md']) {
+      try {
+        text += `\n${await readFile(join(toolkitDir, name), 'utf8')}`;
+      } catch { /* 文档缺失跳过 */ }
+    }
+    return text;
+  }
+
+  async function audit(args, context) {
+    const workspaceDir = sessionWorkspace(context);
+    const action = args?.action;
+    const libraryName = cfg.libraryDir;
+    const trailFile = join(workspaceDir, libraryName, 'audit-trail.json');
+
+    if (action === 'status') {
+      const { trail } = await readAuditTrail(workspaceDir);
+      const list = Array.isArray(trail) ? trail : [];
+      const open = list.filter((e) => e?.status !== 'resolved');
+      return {
+        action: 'status',
+        lastRunAt: list.length > 0 ? list[list.length - 1].ts ?? null : null,
+        openFindings: open.length,
+        trailCount: list.length,
+        trail: list.slice(-20),
+      };
+    }
+
+    if (action !== 'run') {
+      throw new Error(`${name}/project_audit: action 必须是 run/status,得到 ${JSON.stringify(args?.action ?? null)}`);
+    }
+    for (const key of Object.keys(args)) {
+      if (key !== 'action') throw new Error(`${name}/project_audit: run 含未知键 "${key}"`);
+    }
+
+    // 规则表(workspace 级,规则归用户);缺失/坏表 → 空规则 + 提示,不炸整轮。
+    const rulesRes = await readAuditRules(workspaceDir);
+    const rules = rulesRes.rules;
+
+    // plugindevRoot 推导(缺陷 #2 修订):以进程真实 cwd(DESIGN C1:watcher 以 process.cwd() 为根、
+    // DEFAULT_LOG='pipeline-watch.log' 相对 cwd)为可核证单一事实源,不猜安装根。部署副本下
+    // watcher 与 preset 同进程,cwd 仍是 plugindev/,故可命中真实 plugindev/pipeline-watch.log,
+    // 不因 pathResolve(presetDir,'..','..') 落到 .dsh-home 误降级(违背 C2)。
+    const plugindevRoot = typeof process?.cwd === 'function' ? process.cwd() : null;
+    const toolkitDir = (typeof plugindevRoot === 'string' && plugindevRoot.length > 0) ? join(plugindevRoot, 'toolkit') : presetDir;
+
+    // 观察 O1~O6(任一观察非致命失败不炸整轮)。
+    const obs = await runObservations({ workspaceDir, plugindevRoot, toolkitDir, docsText: await readToolkitDocs(toolkitDir) });
+
+    // 规则表引擎(领地白名单硬校验;act:F4 / 升权 F2 → 拒绝报错,AC1)。
+    let engine;
+    try {
+      engine = auditRuleEngine(obs.findings, rules);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      return {
+        action: 'run',
+        status: 'rejected',
+        findings: obs.findings,
+        executed: [],
+        actions: [],
+        rulesUsed: rules.map((r) => r.id),
+        error: msg,
+      };
+    }
+
+    // 去重(by-category/by-target)+ 限频(F2 上限 / meta 冷却期)。
+    const activeRegistries = await scanRegistries(workspaceDir);
+    const activeProjects = activeRegistries.map((r) => ({ id: r.id, title: r.title ?? '', category: r.entitySlug ?? '' }));
+    const { trail: priorTrail } = await readAuditTrail(workspaceDir);
+    const deduped = auditDedupe(engine.actions, activeProjects, priorTrail);
+    const limited = auditRateLimit(deduped.kept, rulesRes.meta);
+
+    // 分流执行 + append-only 留痕。
+    const executed = [];
+    const notes = [];
+    const newTrail = Array.isArray(priorTrail) ? priorTrail.slice() : [];
+    let cursor = 0;
+    const ts = new Date().toISOString();
+    const stamp = ts.replace(/[:.]/g, '-');
+    await mkdir(dirname(trailFile), { recursive: true });
+    const appendTrail = async (entry) => {
+      newTrail.push(entry);
+      await writeJson(trailFile, newTrail);
+    };
+
+    for (const actItem of limited.kept) {
+      cursor += 1;
+      const id = `${actItem.ruleId}-${stamp}-${cursor}`;
+      const finding = obs.findings.find((f) => f.id === actItem.findingId) ?? null;
+      const evidenceRef = Array.isArray(finding?.evidence) ? finding.evidence : [];
+      if (actItem.act === 'F2') {
+        const payload = buildF2Payload(finding, actItem);
+        const projId = `${actItem.ruleId}-${Date.now().toString(36)}`.replace(/[^a-z0-9-]/gi, '').toLowerCase();
+        try {
+          const reg = await register({ title: payload.title, requirement: payload.reason, id: projId }, context);
+          await appendTrail({
+            id, ts, action: 'F2', object: actItem.object, territory: actItem.territory,
+            category: payload.category ?? 'other', target: reg.projectId, auto: true,
+            reason: payload.reason, evidence: evidenceRef,
+            ruleId: actItem.ruleId, findingId: actItem.findingId, status: 'registered', projectId: reg.projectId,
+          });
+          executed.push({ act: 'F2', projectId: reg.projectId, title: payload.title });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          notes.push(`F2 ${actItem.ruleId} 立项失败:${msg}`);
+          await appendTrail({
+            id, ts, action: 'F2', object: actItem.object, territory: actItem.territory,
+            category: payload.category ?? 'other', target: projId, auto: true,
+            reason: payload.reason, evidence: evidenceRef,
+            ruleId: actItem.ruleId, findingId: actItem.findingId, status: 'error', error: msg,
+          });
+        }
+      } else if (actItem.act === 'F1') {
+        const payload = buildF1Payload(finding, actItem);
+        await appendTrail({
+          id, ts, action: 'F1', object: actItem.object, territory: actItem.territory,
+          category: payload.category ?? 'other', target: actItem.object, auto: false,
+          reason: payload.report, evidence: payload.evidence,
+          ruleId: actItem.ruleId, findingId: actItem.findingId, status: 'presented',
+        });
+        executed.push({ act: 'F1', findingId: payload.findingId, report: payload.report });
+      } else if (actItem.act === 'F3') {
+        // 缺陷 #1 修订:F3 直改真实读改写目标数据资产(复用 harvest 既有通道),before/after 真实落留痕。
+        const payload = buildF3Payload(finding, actItem, { object: actItem.object });
+        let edit;
+        try {
+          edit = await applyF3DirectEdit(workspaceDir, {
+            object: actItem.object,
+            territory: actItem.territory,
+            id,
+            ts,
+            ruleId: actItem.ruleId,
+            findingId: actItem.findingId,
+            evidence: payload.evidence,
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          edit = { object: actItem.object, target: null, before: null, after: null, result: 'error', error: msg };
+        }
+        await appendTrail({
+          id, ts, action: 'F3', object: edit.object, territory: actItem.territory,
+          category: actItem.category ?? 'other', target: edit.target ?? edit.object, auto: false,
+          before: edit.before, after: edit.after, evidence: payload.evidence,
+          ruleId: actItem.ruleId, findingId: actItem.findingId,
+          status: edit.result === 'error' ? 'error' : 'applied',
+          result: edit.result, error: edit.error,
+        });
+        executed.push({ act: 'F3', object: edit.object, result: edit.result });
+      }
+    }
+
+    return {
+      action: 'run',
+      status: 'done',
+      findings: obs.findings,
+      obsErrors: obs.errors,
+      actions: limited.kept,
+      dropped: [...deduped.dropped, ...limited.dropped],
+      executed,
+      notes,
+      trailPath: trailFile,
+      rulesUsed: rules.map((r) => r.id),
+    };
+  }
+
+  return { register, advance, gate, budget, status, block, harvest, audit };
 }
 
 // ── 工具 schema(纯 JSON Schema;输出值会被运行时按 schema 严格校验)─────────
@@ -1843,6 +2033,31 @@ const HARVEST_OUTPUT_SCHEMA = {
   required: ['action', 'indexFile'],
 };
 
+// project_audit 输出 schema(0.15.0,自省审计回路)。形状较松(additionalProperties true)
+// 以免过度拒绝;必需字段仅 action(有 status 时额外呈现 status/lastRunAt/openFindings)。
+const AUDIT_OUTPUT_SCHEMA = {
+  type: 'object',
+  additionalProperties: true,
+  properties: {
+    action: { type: 'string', enum: ['run', 'status'] },
+    status: { type: 'string' },
+    error: { type: 'string' },
+    lastRunAt: { anyOf: [{ type: 'string' }, { type: 'null' }] },
+    openFindings: { type: 'integer' },
+    trailCount: { type: 'integer' },
+    trail: { type: 'array' },
+    findings: { type: 'array' },
+    obsErrors: { type: 'array' },
+    actions: { type: 'array' },
+    dropped: { type: 'array' },
+    executed: { type: 'array' },
+    notes: { type: 'array' },
+    trailPath: { type: 'string' },
+    rulesUsed: { type: 'array' },
+  },
+  required: ['action'],
+};
+
 // ── 共享手册提示段(SPEC §9;中文,提纲写全)────────────────────────────────
 
 const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
@@ -1875,6 +2090,7 @@ const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
 9. project_status:不带 projectId 列出工作区全部项目(含未解决卡点数);带 projectId 看单项目详情(当前阶段/门禁态/预算聚合(含统一总 token)/SUMMARY 是否存在/卡点数)。
 10. role_list / role_show:查角色清单;role_show 返回可直接拷进 subagent 调用的参数(persona/toolFilter/agentOptions)与 workspaceNote。
 11. flow_list / flow_show:查流程模板(含 stageCount/stages),workspace 库覆盖 preset 自带。
+12. project_audit:自省审计回路。action=run 跑一轮审计(观察 O1~O6 → 规则表判定 → 去重限频 → 三档分流);action=status 查审计留痕与状态。rules 存 <workspace>/.dsh-library/audit-rules.json(规则归用户),留痕写 .dsh-library/audit-trail.json(append-only)。
 
 ### spawn 纪律
 必须用 per-role 工具名(subagent_<role> / subagent_devhelper)spawn 角色;通用 subagent/subagent_fork 已不可见(机制保证)。
@@ -1944,6 +2160,14 @@ SPEC(clarify 阶段)必须含「可行性分析」章,五维逐条给结论(可�
 - 触点比对:parked 项目进触点比对但标注不冲突(仅 active 项目冲突才上抛 project_block)。
 - **激活冲突检测(0.13.0,kr-entity-mutex)**:project_advance(activate:true) 激活时对同 entity active 项目做互斥检测(排除自身);命中 → 明确拒绝激活(不静默并行),须待 entity 空出或经用户裁决后再激活。
 - 看板:state=parked 项目进入「暂存区」独立分组呈现,不混入 active 列表;state.parked 徽章(zh「暂存」/en「Parked」)。
+
+### 自省审计回路(0.15.0,kr-self-audit)
+- **链路前端**:观察 → 按规则表判定 → 三档分流,不造旁路。F2 立项的单与用户开的单同一条链(register → 角色 → 门禁 → 交付 → 真机验证 → harvest 内化);门禁停摆仍是用户否决点。
+- **观察原语 O1~O6**:watcher 日志(退出频次/事件分布/WS 断连/静默断链)/ BUDGET token 分布 / REGISTRY 门禁时长与 blockers 频次 / lessons 同类 category 计数 / toolkit 文档漂移 / audit-trail 前次发现状态。数据源不可得 → 显式 unsupported 降级(unsupported-degradation),严禁伪造。
+- **F2 领地白名单(硬边界)**:pipeline-ws/(含 .dsh-base/.dsh-library)+ plugindev/toolkit/ + 文档;领地外一律降级 F1 呈递。**规则表本身不能把 F4/F1 客体(flow 模板/角色提示词等)升权 F2**(引擎拒绝报错,AC1)。
+- **三档分流**:F2 → project_register(title 前缀「自省立项」, reason 带证据链(evidence 链,可回放), auto:true);F1 → 审计报告呈递 intake(门禁包/结算同通道);F3 → 数据资产直改 + 写 audit-trail.json 留痕。
+- **去重限频**:dedupe by-category/by-target(同类已有在跑项目/未解决审计产出 → 不重复);每次审计 F2 上限 2;meta 类动作冷却期 30 天 + 至多一条(防自指风暴)。
+- **触发**:harvest 顺带(结项后跑一轮)+ 手动 project_audit(action=run/status)。规则表存 <workspace>/.dsh-library/audit-rules.json(规则归用户,meta 段含 lastMetaActionAt)。
 
 ### 阶段类型四词表
 - work:派一个角色干一件活(必有 role),角色结算后由协调者校验并推进。
@@ -2269,6 +2493,43 @@ export function apply(ctx, config = {}) {
     },
     async execute(args, context) {
       return api.harvest(args, context);
+    },
+  });
+
+  ctx.tools.register({
+    name: 'project_audit',
+    description: '自省审计回路(0.15.0):观察 O1~O6 → 规则表判定 → 去重限频 → 三档分流。action=run 跑一轮审计(F2 走 project_register auto:true / F1 呈递报告 / F3 直改留痕),写 .dsh-library/audit-trail.json append-only;action=status 查审计留痕与状态。规则表存 <workspace>/.dsh-library/audit-rules.json(规则归用户)。领地白名单硬校验:规则表含 act=F4 或对 F1 客体(flow 模板/角色提示词)升权 F2 → 引擎拒绝报错(AC1)。',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        action: { type: 'string', enum: ['run', 'status'], description: 'run=跑一轮审计;status=查审计留痕与状态。' },
+      },
+      required: ['action'],
+    },
+    output: {
+      schema: AUDIT_OUTPUT_SCHEMA,
+      render: (args, value) => {
+        if (value.action === 'status') {
+          return [{ type: 'text', text: [
+            `审计状态:共 ${value.trailCount} 条留痕,未解决 ${value.openFindings} 条,上次运行 ${value.lastRunAt ?? '(无)'}`,
+            value.trail.length > 0 ? `最近 ${value.trail.length} 条:${value.trail.map((t) => `[${t.action}]${t.ruleId ?? ''}:${t.status ?? ''}`).join('; ')}` : '',
+          ].filter(Boolean).join('\n') }];
+        }
+        const notes = value.notes ?? [];
+        return [{ type: 'text', text: [
+          value.status === 'rejected'
+            ? `审计被拒(rules 领地硬校验):${value.error ?? ''}`
+            : `一轮审计完成:${value.findings?.length ?? 0} 条发现,产出分流 ${value.executed?.length ?? 0} 件(actions ${value.actions?.length ?? 0} 个,去重/限频丢弃 ${value.dropped?.length ?? 0} 个)`,
+          value.obsErrors?.length > 0 ? `观察非致命跳过:${value.obsErrors.join('; ')}` : '',
+          ...(value.executed ?? []).map((e) => e.act === 'F2' ? `· [F2] 已立项 ${e.projectId}「${e.title}」` : e.act === 'F1' ? `· [F1] 呈递报告(findingId=${e.findingId ?? ''})` : `· [F3] 直改留痕 ${e.object ?? ''}`),
+          notes.length > 0 ? `注:${notes.join('; ')}` : '',
+          `留痕:${value.trailPath ?? ''}`,
+        ].filter(Boolean).join('\n') }];
+      },
+    },
+    async execute(args, context) {
+      return api.audit(args, context);
     },
   });
 

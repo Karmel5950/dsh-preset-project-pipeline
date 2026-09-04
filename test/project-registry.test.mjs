@@ -148,12 +148,13 @@ async function writeProjcache(workspace, sessions) {
 
 // ── 插件元数据与挂载 ────────────────────────────────────────────────────────
 
-test('插件元数据:7 个工具 + 1 条手册提示段(注册常驻,不接线 ctx.effect)', async () => {
+test('插件元数据:8 个工具 + 1 条手册提示段(注册常驻,不接线 ctx.effect)', async () => {
   const ctx = await mountPlugin();
   assert.equal(name, 'project-pipeline-registry');
   assert.deepEqual(inject, ['tools', 'systemPrompt']);
   assert.deepEqual(ctx.tools.items.map((item) => item.name).sort(), [
     'project_advance',
+    'project_audit',
     'project_block',
     'project_budget',
     'project_gate',
@@ -165,7 +166,7 @@ test('插件元数据:7 个工具 + 1 条手册提示段(注册常驻,不接线 
   const section = ctx.systemPrompt.items[0];
   assert.equal(section.name, 'project-pipeline/manual');
   assert.equal(section.order, 140);
-  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'project_harvest', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked', 'id 入参', 'runtime-events', 'projcache', 'sessions', '底座', 'entitySlug', 'readings', 'MAX_COMPILED_PERSONA', '消费路由', 'negative-premises', 'lessons-index', 'totalToken', 'cacheRate', 'byModel', 'unknown', 'model 来源说明']) {
+  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'project_harvest', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked', 'id 入参', 'runtime-events', 'projcache', 'sessions', '底座', 'entitySlug', 'readings', 'MAX_COMPILED_PERSONA', '消费路由', 'negative-premises', 'lessons-index', 'totalToken', 'cacheRate', 'byModel', 'unknown', 'model 来源说明', '自省审计回路', 'project_audit', 'audit-rules', 'audit-trail', '证据链']) {
     assert.ok(section.text.includes(word), `手册段应包含 ${word}`);
   }
 });

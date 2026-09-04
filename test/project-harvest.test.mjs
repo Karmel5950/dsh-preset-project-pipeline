@@ -148,8 +148,8 @@ test('project_harvest:非法 action/bump 缺 lessonRefs 拒绝;无索引 bump �
   await assert.rejects(() => harvestTool.execute({ action: 'bump-hits', lessonRefs: ['x'] }, context), /rebuild-index/);
 });
 
-test('project_harvest:plugin 注册 7 工具,含 project_harvest', async (t) => {
+test('project_harvest:plugin 注册 8 工具,含 project_harvest', async (t) => {
   const ctx = await mountPlugin();
   const names = ctx.tools.items.map((x) => x.name).sort();
-  assert.deepEqual(names, ['project_advance', 'project_block', 'project_budget', 'project_gate', 'project_harvest', 'project_register', 'project_status']);
+  assert.deepEqual(names, ['project_advance', 'project_audit', 'project_block', 'project_budget', 'project_gate', 'project_harvest', 'project_register', 'project_status']);
 });

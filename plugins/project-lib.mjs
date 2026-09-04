@@ -45,10 +45,19 @@
 //   - entityConflictActive(candidateEntity, registries):同 entity active 互斥检测纯函数,
 //     entitySlugOf 缺省=registry.id(legacy 天然互异、不冲突,25 存量项目零影响);
 //     只增不改、零 npm import。
+// 0.15.0 新增(自省审计回路 kr-self-audit,2026-09-03):
+//   - 观察原语 observeO1~O6(纯函数,扫 FORM §4 数据源,产出发现清单,每条含 evidence);
+//   - 规则表引擎:validateAuditRules / auditTerritoryWhitelist / auditRuleEngine / auditDedupe /
+//     auditRateLimit(领地白名单硬边界:规则表含 act:F4 或对 F1 客体(flow/角色提示词)升权 F2 → 引擎拒绝报错=AC1);
+//   - 分流 payload:buildF2Payload(title 前缀「自省立项」+ reason evidence 链 + auto:true)/
+//     buildF1Payload(发现+evidence+建议)/ buildF3Payload(直改动作+before+after+evidence);
+//   - 观察读容错:readJsonRetry(瞬时半写读容错 registry-halfwrite-read-tolerance);
+//   - audit-rules 默认 meta(metaRuleChangeCooldownDays=30 / maxAutoProjectsPerAudit=2);
+//     只增不改、零 npm import。
 
 import { readFileSync, readdirSync } from 'node:fs';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
-import { dirname, isAbsolute, join } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 
 /** 阶段类型词汇表(框架的强约束;扩类型 = 模板 semver minor,改语义 = major)。 */
 export const STAGE_TYPES = ['work', 'gate', 'summary', 'internalize'];
@@ -1167,4 +1176,980 @@ export function aggregateByModel(committed) {
     bucket.entries += 1;
   }
   return out;
+}
+
+// ── 自省审计回路(kr-self-audit,2026-09-03)──────────────────────────────────
+// 观察 → 规则表判定 → 三档分流(F2 register / F1 呈递 / F3 直改),全部纯函数,
+// 只增不改、零 npm import。语义权威:plugindev/project-pipeline/SELF-OPTIMIZATION-FORM.md。
+// 领地白名单是硬边界,引擎侧校验;规则表本身不能把 F4/F1 客体(flow/角色提示词)升权(AC1 锁定)。
+
+/** 分流动作档位(规则表合法 act;F4 永久禁区,不属于任何级别)。 */
+export const AUDIT_ACTIONS = ['F1', 'F2', 'F3'];
+
+/** F1 客体(永不 F2 升权):flow 模板 / 角色提示词 / preset 源码 / host-plugin / 生产配置。AC1 锁定。 */
+export const F1_OBJECTS = new Set(['flow', 'role-prompt', 'preset-source', 'host-plugin', 'prod-config']);
+
+/** F4 永久禁区客体(任何规则都不可指向):preset 源码 / host-plugin / 生产配置不经人即改。 */
+export const F4_OBJECTS = new Set(['preset-source', 'host-plugin', 'prod-config']);
+
+/** watcher 日志文件名(DEFAULT_LOG 单一事实源,观察 O1 经 plugindevRoot 推导候选)。 */
+export const DEFAULT_WATCH_LOG = 'pipeline-watch.log';
+
+/** audit-rules 默认 meta(规则表缺 meta 段时回退)。 */
+export const DEFAULT_AUDIT_META = {
+  metaRuleChangeCooldownDays: 30,
+  maxAutoProjectsPerAudit: 2,
+  lastMetaActionAt: null,
+};
+
+/** 观察原语集合(规则表 observe 合法取值)。 */
+export const AUDIT_OBSERVES = ['O1', 'O2', 'O3', 'O4', 'O5', 'O6'];
+
+/** 领地从路径前缀标记派生;真实判断经 auditTerritoryWhitelist + territoryInWhitelist。 */
+const TERRITORY_WHITELIST_BASE = ['pipeline-ws', '.dsh-base', '.dsh-library', 'toolkit', 'docs'];
+
+/** 瞬时半写读容错默认参数(tries / delayMs)。 */
+const RETRY_DEFAULTS = { tries: 3, delayMs: 5 };
+
+/** 延迟小件(容错重试用)。 */
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * 瞬时半写读容错(registry-halfwrite-read-tolerance):读 JSON 失败(半写/并发写)重试。
+ * 重试仍失败才 throw(调用方 catch 后按非致命跳过)。只读文件,不写。
+ */
+export async function readJsonRetry(file, options = {}) {
+  const tries = Number.isInteger(options.tries) && options.tries > 0 ? options.tries : RETRY_DEFAULTS.tries;
+  const delayMs = Number.isFinite(options.delayMs) ? options.delayMs : RETRY_DEFAULTS.delayMs;
+  let lastErr;
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    try {
+      return await readJson(file);
+    } catch (error) {
+      lastErr = error;
+      if (attempt < tries) await sleep(delayMs);
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(`读取 ${file} 失败(重试 ${tries} 次)`);
+}
+
+/** audit-trail 路径(<workspace>/.dsh-library/audit-trail.json,append-only)。 */
+export function auditTrailPath(workspaceDir) {
+  return join(workspaceDir, LIBRARY_DIRNAME, 'audit-trail.json');
+}
+
+/** 读 audit-trail(append-only 数组);缺失/坏 JSON → [] + error(不炸调用方)。 */
+export async function readAuditTrail(workspaceDir) {
+  let text;
+  try {
+    text = await readFile(auditTrailPath(workspaceDir), 'utf8');
+  } catch {
+    return { trail: [], error: 'audit-trail.json 不存在(尚无审计留痕)' };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { trail: [], error: `audit-trail.json 不是合法 JSON:${auditTrailPath(workspaceDir)}` };
+  }
+  if (!Array.isArray(parsed)) return { trail: [], error: 'audit-trail.json 须是数组' };
+  return { trail: parsed };
+}
+
+/** audit-rules 路径(<workspace>/.dsh-library/audit-rules.json)。 */
+export function auditRulesPath(workspaceDir) {
+  return join(workspaceDir, LIBRARY_DIRNAME, 'audit-rules.json');
+}
+
+/** 读 audit-rules;缺失/坏 JSON → { rules: [], meta: DEFAULT_AUDIT_META, error }(不炸调用方)。 */
+export async function readAuditRules(workspaceDir) {
+  let text;
+  try {
+    text = await readFile(auditRulesPath(workspaceDir), 'utf8');
+  } catch (error) {
+    return { rules: [], meta: { ...DEFAULT_AUDIT_META }, error: `audit-rules.json 读取失败:${error?.code ?? error?.message ?? error}` };
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { rules: [], meta: { ...DEFAULT_AUDIT_META }, error: `audit-rules.json 不是合法 JSON:${auditRulesPath(workspaceDir)}` };
+  }
+  const checked = validateAuditRules(parsed);
+  if (!checked.ok) return { rules: [], meta: { ...DEFAULT_AUDIT_META }, error: `audit-rules.json 结构非法:${checked.error}` };
+  return { rules: checked.value.rules, meta: checked.value.meta };
+}
+
+/** 规则条目允许键;未知键 → 校验失败。 */
+const AUDIT_RULE_ALLOWED_KEYS = new Set(['id', 'name', 'observe', 'when', 'act', 'object', 'dedupe', 'territory', 'meta', 'recommendation']);
+
+/** `when` 谓词允许的操作符后缀(见 whenMatches)。 */
+const WHEN_SUFFIX_RE = /^(.*)(Gte|Gt|Lte|Lt|Eq|Ne|Contains)$/;
+
+/**
+ * 校验分流规则表(纯函数)。value 形状:
+ *   { schemaVersion:1, meta?:{ metaRuleChangeCooldownDays, maxAutoProjectsPerAudit, lastMetaActionAt },
+ *     rules:[ { id, name?, observe, when, act, object, dedupe?, territory?, meta? } ] }
+ * 要求:meta 可选(缺省回退 DEFAULT_AUDIT_META);rules 为非空数组;每条 id 唯一且 slug、
+ * observe∈O1~O6、when 非空对象、act∈F1/F2/F3(F4 拒绝)、object 非空、dedupe∈by-category/by-target
+ * (缺省 by-target)、territory 非空(领地白名单硬校验在引擎侧,此处只校验存在;F4 客体/升权 F2
+ * 由 auditRuleEngine 拒绝)。返回 { ok, value } 或 { ok:false, error }。
+ */
+export function validateAuditRules(value) {
+  if (!isPlainObject(value)) return bad('audit-rules 必须是 JSON 对象');
+  const allowed = new Set(['schemaVersion', 'meta', 'rules']);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) return bad(`audit-rules 含未知键 "${key}"`);
+  }
+  if (value.schemaVersion !== undefined && value.schemaVersion !== 1) {
+    return bad(`不支持的 schemaVersion(仅支持 1),得到 ${JSON.stringify(value.schemaVersion)}`);
+  }
+  const meta = value.meta ?? { ...DEFAULT_AUDIT_META };
+  if (!isPlainObject(meta)) return bad('audit-rules.meta 必须是对象');
+  if (meta.metaRuleChangeCooldownDays !== undefined && (!Number.isSafeInteger(meta.metaRuleChangeCooldownDays) || meta.metaRuleChangeCooldownDays < 0)) {
+    return bad('meta.metaRuleChangeCooldownDays 必须是非负整数');
+  }
+  if (meta.maxAutoProjectsPerAudit !== undefined && (!Number.isSafeInteger(meta.maxAutoProjectsPerAudit) || meta.maxAutoProjectsPerAudit < 0)) {
+    return bad('meta.maxAutoProjectsPerAudit 必须是非负整数');
+  }
+  if (meta.lastMetaActionAt !== undefined && meta.lastMetaActionAt !== null && !nonEmptyString(meta.lastMetaActionAt)) {
+    return bad('meta.lastMetaActionAt 必须是 ISO 时间戳字符串或 null');
+  }
+  if (!Array.isArray(value.rules) || value.rules.length === 0) return bad('audit-rules.rules 必须是非空数组');
+  const seen = new Set();
+  for (let i = 0; i < value.rules.length; i++) {
+    const r = value.rules[i];
+    const at = `rules[${i}]`;
+    if (!isPlainObject(r)) return bad(`${at} 必须是对象`);
+    for (const key of Object.keys(r)) {
+      if (!AUDIT_RULE_ALLOWED_KEYS.has(key)) return bad(`${at} 含未知键 "${key}"`);
+    }
+    if (!nonEmptyString(r.id) || !/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(r.id)) {
+      return bad(`${at}.id 必须是 slug(字母/数字开头,只含字母/数字/连字符),得到 ${JSON.stringify(r.id ?? null)}`);
+    }
+    if (seen.has(r.id)) return bad(`${at}.id 重复:${r.id}`);
+    seen.add(r.id);
+    if (r.name !== undefined && !nonEmptyString(r.name)) return bad(`${at}.name 若非空必为非空字符串`);
+    if (!AUDIT_OBSERVES.includes(r.observe)) {
+      return bad(`${at}.observe 必须是 ${AUDIT_OBSERVES.join('/')} 之一,得到 ${JSON.stringify(r.observe ?? null)}`);
+    }
+    if (!isPlainObject(r.when) || Object.keys(r.when).length === 0) return bad(`${at}.when 必须是非空对象(判定谓词)`);
+    if (!AUDIT_ACTIONS.includes(r.act)) {
+      // 领地硬校验第一道:act 非法(含 F4)即拒绝(AC1)。
+      return bad(`${at}.act 必须是 ${AUDIT_ACTIONS.join('/')} 之一(F4/升权 F4 永久禁区),得到 ${JSON.stringify(r.act ?? null)}`);
+    }
+    if (!nonEmptyString(r.object)) return bad(`${at}.object 必须是非空字符串(动作客体)`);
+    if (r.dedupe !== undefined && !nonEmptyString(r.dedupe)) {
+      return bad(`${at}.dedupe 若非空必为非空字符串(引擎实现 by-category/by-target,其余为自定义策略 no-op)`);
+    }
+    if (r.territory !== undefined && !nonEmptyString(r.territory)) return bad(`${at}.territory 若非空必为非空字符串`);
+    if (r.meta !== undefined && typeof r.meta !== 'boolean') return bad(`${at}.meta 必须是布尔值`);
+    if (r.recommendation !== undefined && !nonEmptyString(r.recommendation)) return bad(`${at}.recommendation 若非空必为非空字符串`);
+  }
+  return good({ schemaVersion: 1, meta, rules: value.rules });
+}
+
+/** 规则 when 谓词对 finding.value 求值(纯函数;支持 Gte/Gt/Lte/Lt/Eq/Ne/Contains)。 */
+export function whenMatches(when, value) {
+  if (!isPlainObject(when) || value === null || typeof value !== 'object') return false;
+  for (const [cond, threshold] of Object.entries(when)) {
+    const m = WHEN_SUFFIX_RE.exec(cond);
+    if (!m) continue; // 未知谓词键跳过(不炸)
+    const key = m[1];
+    const op = m[2];
+    const found = value[key];
+    if (op === 'Contains') {
+      if (!Array.isArray(found) || !found.includes(threshold)) return false;
+      continue;
+    }
+    if (typeof found !== 'number' || typeof threshold !== 'number') return false;
+    switch (op) {
+      case 'Gte': if (found < threshold) return false; break;
+      case 'Gt': if (found <= threshold) return false; break;
+      case 'Lte': if (found > threshold) return false; break;
+      case 'Lt': if (found >= threshold) return false; break;
+      case 'Eq': if (found !== threshold) return false; break;
+      case 'Ne': if (found === threshold) return false; break;
+      default: return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * 领地白名单常量(硬边界)。返回允许的领土前缀标记数组:
+ *   pipeline-ws/(含 .dsh-base/.dsh-library)+ plugindev/toolkit/ + 文档。
+ * 仅作规则表 territory 前缀的显式锚;引擎侧配合 territoryInWhitelist 做路径级校验。
+ */
+export function auditTerritoryWhitelist() {
+  return [...TERRITORY_WHITELIST_BASE];
+}
+
+/**
+ * territory 是否在领地白名单内(前缀匹配,大小写不敏感;分隔符 / 与 \ 归一)。
+ * 命中白名单任一前缀 → true。用于 F2 动作的领土硬校验;领地外一律降级 F1。
+ */
+export function territoryInWhitelist(territory) {
+  if (typeof territory !== 'string' || territory.length === 0) return false;
+  const norm = territory.replace(/\\/g, '/').toLowerCase().replace(/^\.\//, '');
+  const parts = norm.split('/');
+  // 领地命中 = 路径组件含任一白名单目录(pipeline-ws/.dsh-base/.dsh-library/toolkit/docs)。
+  return auditTerritoryWhitelist().some(
+    (item) => parts.includes(item) || norm === item || norm.startsWith(`${item}/`) || norm.endsWith(`/${item}`),
+  );
+}
+
+/**
+ * 规则表分流引擎(纯函数)。领地白名单硬校验(AC1):
+ *   - 规则表含 act:'F4' → validateAuditRules 已拒绝;此处兜底再查 object ∈ F4_OBJECTS 且 act!=F1 → throw;
+ *   - 对 F1 客体(flow/角色提示词)升权 F2 → throw(AC1 锁定);
+ *   - F2 动作 territory 不在领地白名单 → 降级为 F1(标注 downgraded:true),不抛。
+ * 输入:findings(发现清单,每项含 id/observe/value/category/title/summary/evidence)、
+ * rules(经 validateAuditRules 校验的 rules 数组)。
+ * 返回 { actions, downgrades }(actions = 匹配到的分流动作,已按当值谓词过滤)。
+ */
+export function auditRuleEngine(findings, rules) {
+  if (!Array.isArray(findings)) throw new Error('auditRuleEngine: findings 必须是数组');
+  if (!Array.isArray(rules)) throw new Error('auditRuleEngine: rules 必须是数组');
+  const actions = [];
+  const downgrades = [];
+  for (const rule of rules) {
+    const checked = validateAuditRules({ schemaVersion: 1, rules: [rule] });
+    if (!checked.ok) throw new Error(`auditRuleEngine: 规则 ${rule?.id} 校验失败:${checked.error}`);
+    // AC1:对 F1 客体(flow/角色提示词)升权 F2 → 拒绝报错(硬边界,不由降级绕过)。
+    if (rule.act === 'F2' && F1_OBJECTS.has(rule.object)) {
+      throw new Error(`auditRuleEngine: 规则 ${rule.id} 尝试把 F1 客体 "${rule.object}"(flow/角色提示词等)升权 F2 —— 领地硬边界,拒绝(AC1)`);
+    }
+    // AC1:F4 客体(F4_OBJECTS)经非 F1 通道改生产源码 → 拒绝报错(永久禁区)。
+    if (rule.act !== 'F1' && F4_OBJECTS.has(rule.object)) {
+      throw new Error(`auditRuleEngine: 规则 ${rule.id} 试图以 act=${rule.act} 触及永久禁区客体 "${rule.object}"(F4 改生产源码不经人)——拒绝(AC1)`);
+    }
+    for (const finding of findings) {
+      if (finding?.observe !== rule.observe) continue;
+      if (!whenMatches(rule.when, finding?.value)) continue;
+      const base = {
+        ruleId: rule.id,
+        ruleName: rule.name ?? rule.id,
+        observe: rule.observe,
+        act: rule.act,
+        object: rule.object,
+        dedupe: rule.dedupe ?? 'by-target',
+        territory: rule.territory ?? '',
+        meta: rule.meta === true,
+        recommendation: rule.recommendation ?? '',
+        findingId: finding.id,
+        category: finding.category ?? 'other',
+        dedupeKeys: [finding.category, finding?.value?.category].filter((x) => typeof x === 'string' && x.length > 0),
+        title: finding.title ?? rule.name ?? rule.id,
+        summary: finding.summary ?? '',
+        evidence: Array.isArray(finding.evidence) ? finding.evidence : [],
+      };
+      // 领地白名单:仅对 F2(直改/立项落盘)做领土校验;领地外降级 F1(不抛)。
+      if (rule.act === 'F2' && base.territory !== '' && !territoryInWhitelist(base.territory)) {
+        base.act = 'F1';
+        base.downgraded = true;
+        base.downgradeReason = `territory "${base.territory}" 不在领地白名单,降级 F1 呈递(领地外一律不自主立项)`;
+        downgrades.push({ ruleId: rule.id, findingId: finding.id, territory: base.territory });
+      }
+      actions.push(base);
+    }
+  }
+  return { actions, downgrades };
+}
+
+/**
+ * 去重(auditDedupe):by-category 同 category 已有在跑项目/未解决审计产出 → 不重复;
+ * by-target 同 target 不重复。输入:
+ *   actions(引擎分流动作)、activeProjects([{ id, title, category? }] 在跑项目清单)、
+ *   trail(既有 audit-trail 条目数组,未解决即 status!=='resolved')。
+ * 返回 { kept, dropped:[{action,reason}] }。
+ */
+export function auditDedupe(actions, activeProjects, trail) {
+  const kept = [];
+  const dropped = [];
+  const activeList = Array.isArray(activeProjects) ? activeProjects : [];
+  const trailList = Array.isArray(trail) ? trail : [];
+  const unresolved = trailList.filter((e) => e?.status !== 'resolved');
+  const activeText = activeList
+    .filter((p) => p !== null && typeof p === 'object')
+    .map((p) => `${p.title ?? ''} ${p.id ?? ''} ${p.category ?? ''}`.toLowerCase());
+  for (const action of actions) {
+    let reason = null;
+    if (action.dedupe === 'by-category') {
+      // 语义 category 取 dedupeKeys(含 finding.category 与 value.category,如 O4 的 lesson 分类)。
+      const keys = Array.isArray(action.dedupeKeys) && action.dedupeKeys.length > 0
+        ? action.dedupeKeys
+        : [action.category];
+      const lowerKeys = keys.map((k) => String(k).toLowerCase());
+      const catHit = activeText.some((t) => lowerKeys.some((k) => k.length > 0 && t.includes(k)));
+      const trailHit = unresolved.some((e) => lowerKeys.includes(String(e.category ?? '').toLowerCase()));
+      if (catHit || trailHit) {
+        reason = `by-category: category "${action.category}" 已有在跑项目或未解决审计产出`;
+      }
+    } else if (action.dedupe === 'by-target') {
+      const tgt = String(action.target ?? action.object ?? action.territory ?? '').toLowerCase();
+      if (tgt.length > 0
+        && (activeText.some((t) => t.includes(tgt))
+          || unresolved.some((e) => [String(e.target ?? ''), String(e.object ?? ''), String(e.territory ?? '')]
+            .map((x) => x.toLowerCase()).includes(tgt)))) {
+        reason = `by-target: target "${tgt}" 已有在跑项目或未解决审计产出`;
+      }
+    }
+    if (reason) dropped.push({ action, reason });
+    else kept.push(action);
+  }
+  return { kept, dropped };
+}
+
+/**
+ * 限频(auditRateLimit):单次审计 F2 上限(maxAutoProjectsPerAudit,默认 2,超额截断);
+ * 每次审计至多一条 meta 类动作;meta 冷却期(metaRuleChangeCooldownDays)内 meta 类动作不执行。
+ * 输入 actions + meta(经 validateAuditRules 的 meta)。返回 { kept, dropped:[{action,reason}] }。
+ */
+export function auditRateLimit(actions, meta) {
+  const m = { ...DEFAULT_AUDIT_META, ...(meta ?? {}) };
+  const maxF2 = Number.isSafeInteger(m.maxAutoProjectsPerAudit) ? m.maxAutoProjectsPerAudit : 2;
+  const cooldownDays = Number.isSafeInteger(m.metaRuleChangeCooldownDays) ? m.metaRuleChangeCooldownDays : 30;
+  const kept = [];
+  const dropped = [];
+  let f2Count = 0;
+  let metaSeen = 0;
+  const now = Date.now();
+  for (const action of actions) {
+    if (action.meta === true) {
+      // meta 冷却期:自 lastMetaActionAt 起 cooldownDays 内,不再执行 meta 类动作(防自指风暴)。
+      if (metaSeen >= 1 || (m.lastMetaActionAt ? (now - new Date(m.lastMetaActionAt).getTime()) < cooldownDays * 86400000 : false)) {
+        dropped.push({ action, reason: `meta 冷却期(≥${cooldownDays} 天)内不执行 meta 类动作,且每次审计至多一条` });
+        continue;
+      }
+      metaSeen += 1;
+    }
+    if (action.act === 'F2') {
+      if (f2Count >= maxF2) {
+        dropped.push({ action, reason: `单次审计 F2 上限 ${maxF2} 个,超额截断` });
+        continue;
+      }
+      f2Count += 1;
+    }
+    kept.push(action);
+  }
+  return { kept, dropped };
+}
+
+/** 证据链可回放格式(供 F2 reason 嵌入):把 evidence 列表压成一行 `file#ref; file#ref; ...`。 */
+export function evidenceChain(evidence) {
+  if (!Array.isArray(evidence)) return '';
+  return evidence
+    .map((e) => `${e?.file ?? ''}${e?.ref ? `#${e.ref}` : ''}`)
+    .filter((x) => x.length > 0)
+    .join('; ');
+}
+
+/**
+ * F2 立项 payload(纯函数):register 单据形状。title 前缀「自省立项」、reason 带 evidence 链、
+ * auto:true。供 project_audit 分流执行调 project_register(不走人,表单据本身可审计)。
+ */
+export function buildF2Payload(finding, rule, extra = {}) {
+  const f = finding ?? {};
+  const r = rule ?? {};
+  return {
+    title: `自省立项: ${f.title ?? r.name ?? r.id ?? '自省优化'}`,
+    reason: `[自省审计回路] ${f.summary ?? ''} 证据链:${evidenceChain(f.evidence)} (ruleId=${r.id ?? ''}, findingId=${f.id ?? ''})`,
+    auto: true,
+    ruleId: r.id ?? null,
+    findingId: f.id ?? null,
+    category: f.category ?? 'other',
+    territory: r.territory ?? '',
+    ...extra,
+  };
+}
+
+/**
+ * F1 呈递 payload(纯函数):审计报告(发现 + evidence + 建议),供 intake 门禁包/结算同通道。
+ */
+export function buildF1Payload(finding, rule) {
+  const f = finding ?? {};
+  const r = rule ?? {};
+  return {
+    act: 'F1',
+    ruleId: r.id ?? null,
+    findingId: f.id ?? null,
+    category: f.category ?? 'other',
+    title: f.title ?? r.name ?? r.id ?? '',
+    summary: f.summary ?? '',
+    evidence: Array.isArray(f.evidence) ? f.evidence : [],
+    recommendation: r.recommendation ?? '',
+    report: [
+      `【自省审计 · 呈递】${f.title ?? ''}`,
+      `依据规则 ${r.id ?? ''}(observe=${r.observe ?? ''}, act 建议=F1)`,
+      `发现:${f.summary ?? ''}`,
+      `证据:${evidenceChain(f.evidence) || '(无具体证据)'}`,
+      r.recommendation ? `建议:${r.recommendation}` : '',
+    ].filter(Boolean).join('\n'),
+  };
+}
+
+/**
+ * F3 直改 payload(纯函数):数据资产直改动作 + trace 留痕(before/after/evidence)。
+ * 只产形状;真实直改由 project_audit 执行并写 audit-trail.json。
+ */
+export function buildF3Payload(finding, rule, { object, before, after, result } = {}) {
+  const f = finding ?? {};
+  const r = rule ?? {};
+  return {
+    act: 'F3',
+    ruleId: r.id ?? null,
+    findingId: f.id ?? null,
+    category: f.category ?? 'other',
+    object: object ?? r.object ?? '',
+    before: before ?? null,
+    after: after ?? null,
+    result: result ?? null,
+    evidence: Array.isArray(f.evidence) ? f.evidence : [],
+    trace: {
+      id: `${r.id ?? 'F3'}-${f.id ?? 'finding'}-${nowStamp()}`,
+      ts: new Date().toISOString(),
+      action: 'F3',
+      object: object ?? r.object ?? '',
+      before,
+      after,
+      evidence: Array.isArray(f.evidence) ? f.evidence : [],
+      ruleId: r.id ?? null,
+      result: result ?? null,
+    },
+  };
+}
+
+/** F3 直改目标路径解析(纯函数):默认 .dsh-library/<object>;含分隔 → 相对 workspace;拒绝 .. 与越界。 */
+export function resolveF3Target(workspaceDir, object, territory) {
+  if (!nonEmptyString(object)) return resolve(workspaceDir, '.dsh-library', 'remediations.json');
+  let rel = object.trim().replace(/\\/g, '/');
+  if (rel.startsWith('pipeline-ws/')) rel = rel.slice('pipeline-ws/'.length);
+  if (rel.startsWith('./')) rel = rel.slice(2);
+  if (rel.split('/').includes('..') || rel.includes('..')) {
+    throw new Error(`F3 直改目标含 ".." 路径段,拒绝:${object}`);
+  }
+  const base = resolve(workspaceDir);
+  if (rel.startsWith('/') || /^[a-zA-Z]:[\\/]/.test(rel)) {
+    const target = resolve(rel);
+    if (!String(target).startsWith(base)) throw new Error(`F3 直改目标超出 workspace 根:${object}`);
+    return target;
+  }
+  if (rel.includes('/')) {
+    const target = resolve(workspaceDir, rel);
+    if (!String(target).startsWith(base)) throw new Error(`F3 直改目标超出 workspace 根:${object}`);
+    return target;
+  }
+  return resolve(workspaceDir, '.dsh-library', rel);
+}
+
+/**
+ * F3 直改执行(缺陷 #1 修订):复用 harvest 既有通道真实读改写工作区级数据资产
+ * (默认 .dsh-library/<object>,默认 remediations.json 独立整改登记;或 .md 底座文本追加)。
+ * 受控写面(controlled-write-surface-boundary):执行前读 before、执行后写 after,
+ * 失败抛错由调用方记 error;留痕含 before/after(JSON 完整、文本摘要),可回滚。
+ * 领地硬边界:目标必须落在 .dsh-library / .dsh-base / toolkit / docs 白名单目录内。
+ * 返回 { object, target, isMd, before, after, result:'applied' };失败 throw(不落半态)。
+ */
+export async function applyF3DirectEdit(workspaceDir, spec = {}) {
+  const object = (typeof spec.object === 'string' && spec.object.trim().length > 0) ? spec.object.trim() : 'remediations.json';
+  const target = resolveF3Target(workspaceDir, object, spec.territory);
+  const base = resolve(workspaceDir);
+  const relForCheck = String(target).startsWith(base) ? relative(workspaceDir, target).replace(/\\/g, '/') : '';
+  if (!territoryInWhitelist(relForCheck)) throw new Error(`F3 直改目标超出领地白名单:${relForCheck || object}`);
+  const id = spec.id ?? `F3-${nowStamp()}`;
+  const ts = spec.ts ?? new Date().toISOString();
+  const evidence = Array.isArray(spec.evidence) ? spec.evidence : [];
+  const isMd = /\.md$/i.test(target);
+  await mkdir(dirname(target), { recursive: true });
+  if (isMd) {
+    let text = '';
+    try { text = await readFile(target, 'utf8'); } catch { text = ''; }
+    const before = text;
+    const append = `\n\n### [自省整改] ${spec.ruleId ?? 'F3'} ${ts}\n- findingId: ${spec.findingId ?? ''}\n- 证据: ${evidenceChain(evidence) || '(无)'}\n`;
+    const after = text + append;
+    await writeFile(target, after, 'utf8');
+    return { object, target, isMd: true, before, after, result: 'applied' };
+  }
+  // JSON 数据资产:读 before → after = before 追加 auditRemediations 登记(受控可回滚)。
+  let parsed = null;
+  try { parsed = await readJsonRetry(target); } catch { parsed = null; }
+  if (parsed !== null && (Array.isArray(parsed) || typeof parsed !== 'object')) {
+    throw new Error(`F3 直改目标 ${relForCheck || object} 顶层非对象(不支持数组/标量),拒绝改写`);
+  }
+  const before = parsed === null || parsed === undefined ? null : structuredClone(parsed);
+  const baseObj = (before === null) ? {} : { ...before };
+  const entries = Array.isArray(baseObj.auditRemediations) ? [...baseObj.auditRemediations] : [];
+  entries.push({
+    id, ts, ruleId: spec.ruleId ?? null, findingId: spec.findingId ?? null,
+    status: 'OPEN', evidence,
+  });
+  const after = { ...baseObj, auditRemediations: entries };
+  await writeJson(target, after);
+  return { object, target, isMd: false, before, after, result: 'applied' };
+}
+
+// ── 观察原语 O1~O6(纯函数,data source 全部已存在,零新增采集)───────────────
+// 每条发现 shape:
+//   { id, observe, category, title, summary, value, status:'supported'|'unsupported',
+//     reason?(unsupported), evidence:[{ file, ref?, line?, ts? }] }
+// 数据源不可得 → status:'unsupported' 显式降级(unsupported-degradation),严禁伪造。
+
+/** 归一 evidence 引用(路径为相对或绝对均可;ref 为行号/条目/时间戳)。 */
+function ev(file, ref, ts) {
+  const e = { file };
+  if (ref !== undefined && ref !== null && ref !== '') e.ref = String(ref);
+  if (ts !== undefined && ts !== null && ts !== '') e.ts = String(ts);
+  return e;
+}
+
+/** 扫目录下的 .mjs 文件相对路径(供 O5 用);目录缺失 → null。 */
+async function listFilesRel(dir) {
+  let out = [];
+  let entries = [];
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    const p = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      const sub = await listFilesRel(p);
+      if (sub !== null) out = out.concat(sub.map((s) => `${entry.name}/${s}`));
+    } else {
+      out.push(entry.name);
+    }
+  }
+  return out;
+}
+
+/**
+ * O1 watcher 日志观察(纯函数,读文件)。plugindevRoot 缺省 = process.cwd():
+ * 以进程真实 cwd(DESIGN C1:watcher 以 process.cwd() 为根,DEFAULT_LOG 相对 cwd)为单一事实源,
+ * 候选第一 = resolve(process.cwd(), DEFAULT_LOG);plugindevRoot 仅作显式覆盖/测试注入。
+ * 部署副本下进程 cwd 仍为 plugindev/(watcher 与 preset 同进程),故可命中真实
+ * plugindev/pipeline-watch.log,不因预设部署路径(pathResolve(presetDir,'..','..'))误降级 ——
+ * 不用猜测安装根推导真实落点(缺陷 #2 修订,违背 C2 修复)。
+ * 解析(启发式):退出频次 / 事件分布 / WS 断连 / 静默断链;全不可得 → status:'unsupported'(仅兜底)。
+ */
+export async function observeO1(plugindevRoot, options = {}) {
+  const candidates = [];
+  // 事实源 = 进程 cwd(可核证,不猜测);plugindevRoot 显式给出时优先,否则回退 cwd。
+  const root = (typeof plugindevRoot === 'string' && plugindevRoot.length > 0) ? plugindevRoot : process.cwd();
+  candidates.push(resolve(root, DEFAULT_WATCH_LOG));
+  if (typeof process?.cwd === 'function') {
+    candidates.push(resolve(process.cwd(), DEFAULT_WATCH_LOG));
+    candidates.push(resolve(process.cwd(), 'pipeline-ws', DEFAULT_WATCH_LOG));
+    candidates.push(resolve(process.cwd(), '.dsh-home', DEFAULT_WATCH_LOG));
+  }
+  if (Array.isArray(options.candidates)) candidates.push(...options.candidates.map((c) => resolve(c)));
+  const seen = new Set();
+  const uniqueCandidates = candidates.filter((c) => (seen.has(c) ? false : (seen.add(c), true)));
+  let logFile = null;
+  let text = null;
+  for (const cand of uniqueCandidates) {
+    try {
+      text = await readFile(cand, 'utf8');
+      logFile = cand;
+      break;
+    } catch { /* 候选不可得,继续 */ }
+  }
+  if (logFile === null || text === null) {
+    return [{
+      id: 'O1-unsupported',
+      observe: 'O1',
+      category: 'test-env',
+      title: 'watcher 日志不可得',
+      summary: 'O1 数据源(watcher 日志)候选路径全部不可得,显式 unsupported 降级',
+      value: { logFile: false },
+      status: 'unsupported',
+      reason: 'watcher log not found',
+      evidence: uniqueCandidates.map((c) => ev(c, 'missing')),
+    }];
+  }
+  const lines = text.split('\n');
+  const total = lines.length;
+  // 退出频次:行内含退出关键词。
+  const exitLines = lines
+    .map((l, i) => ({ l, i: i + 1 }))
+    .filter(({ l }) => /exit|退出|EXIT|shutdown|结束/i.test(l));
+  // 事件分布:按 event:/事件: 标记聚合。
+  const eventCounts = {};
+  for (const { l } of lines.map((l, i) => ({ l, i }))) {
+    const m = /(?:event|事件)[:：]\s*([A-Za-z0-9_-]+)/i.exec(l);
+    if (m) {
+      const name = m[1].toLowerCase();
+      eventCounts[name] = (eventCounts[name] ?? 0) + 1;
+    }
+  }
+  const eventList = Object.entries(eventCounts).map(([name, count]) => ({ name, count }));
+  // WS 断连:websocket 断连关键词。
+  const wsLines = lines
+    .map((l, i) => ({ l, i: i + 1 }))
+    .filter(({ l }) => /websocket|ws[:/]|断连|断开|disconnect/i.test(l));
+  // 静默断链:心跳超时 / silent / 无数据。
+  const silentLines = lines
+    .map((l, i) => ({ l, i: i + 1 }))
+    .filter(({ l }) => /silent|静默|心跳|heartbeat|no data|timeout|超时/i.test(l));
+  const finding = {
+    id: 'O1-watch',
+    observe: 'O1',
+    category: 'test-env',
+    title: 'watcher 活动观察',
+    summary: `watcher 日志 ${total} 行:退出频次 ${exitLines.length}、事件 ${Object.keys(eventCounts).length} 类、WS 断连 ${wsLines.length}、静默/心跳超时 ${silentLines.length}`,
+    value: {
+      totalLines: total,
+      exitCount: exitLines.length,
+      wsDisconnectCount: wsLines.length,
+      silentDisconnectCount: silentLines.length,
+      eventCount: Object.keys(eventCounts).length,
+    },
+    status: 'supported',
+    evidence: [
+      ev(logFile, undefined, undefined),
+      ...exitLines.slice(0, 3).map(({ l, i }) => ev(logFile, i, l.slice(0, 60))),
+      ...wsLines.slice(0, 3).map(({ l, i }) => ev(logFile, i, l.slice(0, 60))),
+      ...silentLines.slice(0, 3).map(({ l, i }) => ev(logFile, i, l.slice(0, 60))),
+    ].slice(0, 8),
+  };
+  return [finding];
+}
+
+/** 项目目录清单(workspace 下含 .dsh-project 的子目录);缺失 → []。 */
+export async function projectDirs(workspaceDir) {
+  const out = [];
+  let entries;
+  try {
+    entries = await readdir(workspaceDir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    if ((entry.name.startsWith('.') && entry.name !== '.') || entry.name === '_selftest') continue;
+    try {
+      await stat(join(workspaceDir, entry.name, '.dsh-project'));
+      out.push(entry.name);
+    } catch { /* 不是项目目录,跳过 */ }
+  }
+  return out;
+}
+
+/**
+ * O2 BUDGET token 分布观察。各项目 BUDGET.committed(runtime-events)按角色/阶段聚合,
+ * 报告分布与异常值(峰值角色/阶段)。读容错(registry-halfwrite-read-tolerance):失败重试,仍失败按项目跳过。
+ */
+export async function observeO2(workspaceDir) {
+  const findings = [];
+  let dirs = [];
+  try {
+    dirs = await projectDirs(workspaceDir);
+  } catch {
+    return findings;
+  }
+  const byRole = {};
+  const byStage = {};
+  let budgetProjects = 0;
+  for (const pid of dirs) {
+    const budgetFile = join(workspaceDir, pid, '.dsh-project', 'BUDGET.json');
+    let budget;
+    try {
+      budget = await readJsonRetry(budgetFile);
+    } catch {
+      continue; // 半写/坏预算,跳过(registry-halfwrite-read-tolerance)
+    }
+    const committed = Array.isArray(budget?.committed) ? budget.committed : [];
+    if (committed.length === 0) continue;
+    budgetProjects += 1;
+    for (const entry of committed) {
+      if (!(entry?.source === 'runtime-events' && entry?.usage && typeof entry.usage === 'object')) continue;
+      const role = typeof entry.role === 'string' && entry.role.length > 0 ? entry.role : 'unknown';
+      const stage = typeof entry.stageId === 'string' && entry.stageId.length > 0 ? entry.stageId : 'unknown';
+      const tok = totalToken(entry.usage);
+      const rb = (byRole[role] ??= { tokens: 0, count: 0 });
+      rb.tokens += tok; rb.count += 1;
+      const sb = (byStage[stage] ??= { tokens: 0, count: 0 });
+      sb.tokens += tok; sb.count += 1;
+    }
+  }
+  if (budgetProjects === 0) {
+    return [{
+      id: 'O2-no-budget',
+      observe: 'O2',
+      category: 'dev-complexity',
+      title: '无 runtime-events 预算记录',
+      summary: 'O2:未发现任何项目 BUDGET.runtime-events committed 条目,无法观测 token 分布',
+      value: { budgetProjects: 0 },
+      status: 'supported',
+      evidence: [],
+    }];
+  }
+  const roleAgg = Object.entries(byRole)
+    .map(([role, v]) => ({ role, tokens: v.tokens, count: v.count }))
+    .sort((a, b) => b.tokens - a.tokens);
+  const stageAgg = Object.entries(byStage)
+    .map(([stage, v]) => ({ stage, tokens: v.tokens, count: v.count }))
+    .sort((a, b) => b.tokens - a.tokens);
+  const peakRole = roleAgg[0];
+  const peakStage = stageAgg[0];
+  const findingsArr = [{
+    id: 'O2-token-dist',
+    observe: 'O2',
+    category: 'dev-complexity',
+    title: '预算 token 分布',
+    summary: `O2:${budgetProjects} 个项目有 runtime-events 预算;峰值角色 ${peakRole?.role ?? '-'}:${peakRole?.tokens ?? 0} token,峰值阶段 ${peakStage?.stage ?? '-'}:${peakStage?.tokens ?? 0} token`,
+    value: {
+      budgetProjects,
+      roleCount: roleAgg.length,
+      peakRoleTokens: peakRole?.tokens ?? 0,
+      peakStageTokens: peakStage?.tokens ?? 0,
+    },
+    status: 'supported',
+    evidence: [
+      ev(join('budget', 'runtime-events'), `peakRole=${peakRole?.role ?? '-'}`),
+      ev(join('budget', 'runtime-events'), `peakStage=${peakStage?.stage ?? '-'}`),
+    ],
+  }];
+  // 异常值:role/stage 中明显偏离(占比 >80% 总且只有单一角色)时单列一条。
+  const totalTokens = roleAgg.reduce((a, x) => a + x.tokens, 0);
+  if (roleAgg.length > 0 && totalTokens > 0 && peakRole && peakRole.tokens / totalTokens > 0.8) {
+    findingsArr.push({
+      id: 'O2-peak-concentration',
+      observe: 'O2',
+      category: 'dev-complexity',
+      title: 'token 分布高度集中',
+      summary: `O2:角色 ${peakRole.role} 占 runtime-events 总 token ${Math.round((peakRole.tokens / totalTokens) * 100)}%,分布异常集中`,
+      value: { concentration: peakRole.tokens / totalTokens, peakRoleTokens: peakRole.tokens },
+      status: 'supported',
+      evidence: [ev(join('budget', 'runtime-events'), `role=${peakRole.role} tokens=${peakRole.tokens}`)],
+    });
+  }
+  return findingsArr;
+}
+
+/**
+ * O3 门禁时长 + blockers category 频次观察。扫各项目 REGISTRY blockers(复用 collectAllBlockers/
+ * aggregateByCategory)+ 门禁 pending 状态(updatedAt 为进入该阶段的近似时间戳)。
+ */
+export async function observeO3(workspaceDir) {
+  const findings = [];
+  const blockers = await collectAllBlockers(workspaceDir);
+  const agg = aggregateByCategory(blockers);
+  const dirs = await projectDirs(workspaceDir);
+  const pendingGates = [];
+  const now = Date.now();
+  for (const pid of dirs) {
+    const regFile = join(workspaceDir, pid, '.dsh-project', 'REGISTRY.json');
+    let reg;
+    try {
+      reg = await readJsonRetry(regFile);
+    } catch {
+      continue;
+    }
+    if (reg?.gateStatus === 'pending') {
+      const updatedAt = reg.updatedAt;
+      const hours = typeof updatedAt === 'string' && updatedAt.length > 0
+        ? (now - new Date(updatedAt).getTime()) / 3600000
+        : null;
+      pendingGates.push({ projectId: pid, pendingHours: hours !== null && Number.isFinite(hours) ? hours : 0 });
+    }
+  }
+  if (agg.length > 0) {
+    for (const item of agg) {
+      findings.push({
+        id: `O3-block-${item.category}`,
+        observe: 'O3',
+        category: 'other',
+        title: `卡点类别风暴:${item.category}`,
+        summary: `O3:${item.category} 类卡点 ${item.count} 次(≥2,机制缺陷未修候选)`,
+        value: { categoryCount: item.count, category: item.category },
+        status: 'supported',
+        evidence: item.cases.map((c) => ev(join(pidDir(c.projectId), 'REGISTRY.json'), `blocker=${c.blockerId}`)),
+      });
+    }
+  }
+  if (pendingGates.length > 0) {
+    const slowest = pendingGates.find((p) => p.pendingHours >= 4) ?? pendingGates[0];
+    findings.push({
+      id: 'O3-gate-slow',
+      observe: 'O3',
+      category: 'other',
+      title: '门禁待裁决超时',
+      summary: `O3:${pendingGates.length} 个门禁 pending;最久 ${slowest.projectId} 已待 ${Math.round(slowest.pendingHours)} 小时`,
+      value: { pendingGates: pendingGates.length, pendingHours: Math.round(slowest.pendingHours) },
+      status: 'supported',
+      evidence: pendingGates.slice(0, 3).map((p) => ev(join(p.projectId, '.dsh-project', 'REGISTRY.json'), `pendingHours=${Math.round(p.pendingHours)}`)),
+    });
+  }
+  return findings;
+}
+
+/** 项目相对 registry 目录小件(O3 evidence 引用用)。 */
+function pidDir(pid) {
+  return pid;
+}
+
+/**
+ * O4 lessons/patterns 同类 category 计数观察。读 lessons-index.json(由 harvest 维护),
+ * category 计数 ≥3 = 机制缺陷未修候选。缺索引 → unsupported(需先 harvest rebuild-index)。
+ */
+export async function observeO4(workspaceDir) {
+  const indexFile = join(workspaceDir, LIBRARY_DIRNAME, 'lessons-index.json');
+  let index;
+  try {
+    index = await readJsonRetry(indexFile);
+  } catch {
+    return [{
+      id: 'O4-no-index',
+      observe: 'O4',
+      category: 'design-info',
+      title: 'lessons-index 缺失',
+      summary: 'O4:lessons-index.json 缺失(尚未重建),同类 category 计数不可观测;先 harvest rebuild-index',
+      value: { index: false },
+      status: 'unsupported',
+      reason: 'lessons-index.json not found',
+      evidence: [ev(indexFile, 'missing')],
+    }];
+  }
+  const findings = [];
+  const cats = index?.categories ?? {};
+  for (const [category, list] of Object.entries(cats)) {
+    if (!Array.isArray(list)) continue;
+    if (list.length >= 3) {
+      findings.push({
+        id: `O4-cat-${category}`,
+        observe: 'O4',
+        category: 'design-info',
+        title: `同类 lesson 堆积:${category}`,
+        summary: `O4:category "${category}" 有 ${list.length} 篇(≥3 = 机制缺陷未修候选)`,
+        value: { categoryCount: list.length, category },
+        status: 'supported',
+        evidence: list.slice(0, 5).map((x) => ev(indexFile, `entry=${x?.id}`)),
+      });
+    }
+  }
+  return findings.length > 0 ? findings : [];
+}
+
+/**
+ * O5 toolkit 实文件 vs 文档差集观察(纯函数)。toolkitDir 为 toolkit 实际目录;
+ * docsText 为 README/PROTOCOL 文本。差集 A−B(未记录文件)+ B−A(记录但缺失)+ deprecated 未清理。
+ * 返回 [ finding ](含 driftCount)。toolkit 目录缺失 → unsupported。
+ */
+export async function observeO5(toolkitDir, docsText) {
+  const actual = await listFilesRel(toolkitDir);
+  if (actual === null) {
+    return [{
+      id: 'O5-no-toolkit',
+      observe: 'O5',
+      category: 'deploy-permission',
+      title: 'toolkit 目录不可得',
+      summary: 'O5:toolkit 目录缺失,实文件 vs 文档差集不可观测',
+      value: { driftCount: 0 },
+      status: 'unsupported',
+      reason: 'toolkitDir not found',
+      evidence: [],
+    }];
+  }
+  const docs = typeof docsText === 'string' ? docsText : '';
+  const refSet = new Set();
+  // 约定模式:toolkit/<name>、plugins/<name>.mjs、PROTOCOL 里引用的 .mjs/.md 路径。
+  const docRefs = [...docs.matchAll(/(?:toolkit|plugins)\/([A-Za-z0-9_.\-\/]+\.(?:mjs|md|json|yml|yaml))/gi)].map((m) => m[1]);
+  for (const ref of docRefs) refSet.add(ref.replace(/^\.\//, ''));
+  const B = [...refSet].sort();
+  const AminusB = actual.filter((a) => !refSet.has(a));
+  const BminusA = B.filter((b) => !actual.includes(b));
+  const deprecated = actual.filter((a) => /deprecated|obsolete/i.test(a));
+  const driftCount = AminusB.length + BminusA.length + deprecated.length;
+  const pieces = [];
+  if (AminusB.length > 0) pieces.push(ev(toolkitDir, `unrecorded=${AminusB.slice(0, 3).join(',')}`));
+  if (BminusA.length > 0) pieces.push(ev(docsText !== '' ? 'docs' : 'docs', `missing=${BminusA.slice(0, 3).join(',')}`));
+  if (deprecated.length > 0) pieces.push(ev(toolkitDir, `deprecated=${deprecated.slice(0, 3).join(',')}`));
+  return [{
+    id: 'O5-doc-drift',
+    observe: 'O5',
+    category: 'deploy-permission',
+    title: '工具/文档漂移',
+    summary: `O5:toolkit 实文件 ${actual.length} 个 vs 文档记录 ${B.length} 个;差集 drift=${driftCount}(A−B ${AminusB.length},B−A ${BminusA.length},deprecated ${deprecated.length})`,
+    value: { driftCount, actualCount: actual.length, docCount: B.length, unrecorded: AminusB.length, missing: BminusA.length, deprecated: deprecated.length },
+    status: 'supported',
+    evidence: pieces.slice(0, 6),
+  }];
+}
+
+/**
+ * O6 前次审计发现状态观察。读 audit-trail.json,报告未解决(open/超龄未动)条目。
+ * 超龄阈值默认 30 天(超龄未动 = 已立项/已呈递却长期无进展)。
+ */
+export async function observeO6(workspaceDir, options = {}) {
+  const { trail, error } = await readAuditTrail(workspaceDir);
+  if (!Array.isArray(trail) || trail.length === 0) {
+    return [{
+      id: 'O6-no-trail',
+      observe: 'O6',
+      category: 'other',
+      title: '尚无审计留痕',
+      summary: `O6:audit-trail.json 为空/缺失,前次审计发现状态不可观测${error ? `(${error})` : ''}`,
+      value: { openCount: 0 },
+      status: 'supported',
+      evidence: trail.length > 0 ? [ev(auditTrailPath(workspaceDir), undefined)] : [],
+    }];
+  }
+  const staleDays = Number.isFinite(options.staleDays) ? options.staleDays : 30;
+  const now = Date.now();
+  const openItems = trail.filter((e) => e?.status !== 'resolved');
+  const staleItems = openItems.filter((e) => {
+    const ts = e?.ts ?? e?.createdAt;
+    return typeof ts === 'string' && ts.length > 0 && (now - new Date(ts).getTime()) > staleDays * 86400000;
+  });
+  const findings = [];
+  if (staleItems.length > 0) {
+    findings.push({
+      id: 'O6-stale',
+      observe: 'O6',
+      category: 'other',
+      title: '前次审计发现超龄未动',
+      summary: `O6:${staleItems.length} 条审计留痕未解决且超龄 ${staleDays} 天未动(已立项/已呈递却无进展)`,
+      value: { openCount: openItems.length, staleCount: staleItems.length, staleDays },
+      status: 'supported',
+      evidence: staleItems.slice(0, 5).map((e) => ev(auditTrailPath(workspaceDir), e?.ts ?? '')).filter((x) => x !== null),
+    });
+  } else if (openItems.length > 0) {
+    findings.push({
+      id: 'O6-open',
+      observe: 'O6',
+      category: 'other',
+      title: '前次审计发现待解决',
+      summary: `O6:${openItems.length} 条审计留痕未解决(未超龄)`,
+      value: { openCount: openItems.length, staleCount: 0, staleDays },
+      status: 'supported',
+      evidence: openItems.slice(0, 5).map((e) => ev(auditTrailPath(workspaceDir), e?.ts ?? '')).filter((x) => x !== null),
+    });
+  }
+  return findings;
+}
+
+/** 汇聚一轮审计的全部发现(O1~O6),任一观察非致命失败不炸整轮。 */
+export async function runObservations(ctx) {
+  const findings = [];
+  const errors = [];
+  const steps = [
+    async () => (await observeO1(ctx.plugindevRoot)).forEach((f) => findings.push(f)),
+    async () => (await observeO2(ctx.workspaceDir)).forEach((f) => findings.push(f)),
+    async () => (await observeO3(ctx.workspaceDir)).forEach((f) => findings.push(f)),
+    async () => (await observeO4(ctx.workspaceDir)).forEach((f) => findings.push(f)),
+    async () => (await observeO5(ctx.toolkitDir, ctx.docsText)).forEach((f) => findings.push(f)),
+    async () => (await observeO6(ctx.workspaceDir)).forEach((f) => findings.push(f)),
+  ];
+  for (const step of steps) {
+    try {
+      await step();
+    } catch (e) {
+      errors.push(e instanceof Error ? e.message : String(e));
+    }
+  }
+  return { findings, errors };
 }
