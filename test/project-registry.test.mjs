@@ -130,7 +130,7 @@ async function advanceTo(t, ctx, workspace, projectId, targetIndex) {
           projectId,
           stageId: fresh.project.currentStage.id,
           action: 'decide',
-          decision: { verdict: 'approve' },
+          decision: { verdict: 'approve', rulingRef: 'rpc-test-advance' },
         }, context);
       }
     }
@@ -721,7 +721,7 @@ test('project_advance:gate pending 拒绝;approve 清空后推进', async (t) =>
     /待裁决/,
   );
   await getTool(ctx, 'project_gate').execute({
-    projectId, stageId: 'review', action: 'decide', decision: { verdict: 'approve' },
+    projectId, stageId: 'review', action: 'decide', decision: { verdict: 'approve', rulingRef: 'rpc-test-approve' },
   }, context);
   assert.equal((await readJson(paths.registryFile)).gateStatus, 'approve');
   const result = await getTool(ctx, 'project_advance').execute({ projectId }, context);
@@ -829,6 +829,90 @@ test('project_gate:重复 present 拒绝;未 present 就 decide 拒绝;stageId/�
   );
 });
 
+// ── 门禁授权源校验(kr-gate-auth,0.20.0):approve 必须携带 rulingRef ──────
+
+test('project_gate:approve 无 rulingRef 机械拒绝(AC1-1)', async (t) => {
+  const { workspace, ctx, projectId } = await registerMini(t);
+  const context = sessionContext(workspace);
+  const gateTool = getTool(ctx, 'project_gate');
+  await getTool(ctx, 'project_advance').execute({ projectId }, context); // → review
+  await gateTool.execute({ projectId, stageId: 'review', action: 'present', package: { summary: 's' } }, context);
+  await assert.rejects(
+    () => gateTool.execute({ projectId, stageId: 'review', action: 'decide', decision: { verdict: 'approve' } }, context),
+    /门禁 approve 须引用主线程裁决指针\(kr-gate-auth\)/,
+    'approve 无 rulingRef 应被机械拒绝',
+  );
+  const registry = await readJson(registryPaths(workspace, projectId).registryFile);
+  assert.equal(registry.gateStatus, 'pending', '拒绝后门禁仍待裁决,不落裁决');
+});
+
+test('project_gate:approve 合法 rulingRef(帧 rpcId 形态)通过(AC1-2 + 两通道兼容·子项 b)', async (t) => {
+  const { workspace, ctx, projectId } = await registerMini(t);
+  const context = sessionContext(workspace);
+  const gateTool = getTool(ctx, 'project_gate');
+  await getTool(ctx, 'project_advance').execute({ projectId }, context);
+  await gateTool.execute({ projectId, stageId: 'review', action: 'present', package: { summary: 's' } }, context);
+  const decided = await gateTool.execute({
+    projectId, stageId: 'review', action: 'decide',
+    decision: { verdict: 'approve', rulingRef: 'rpc-9f3a2b1c' },
+  }, context);
+  assert.equal(decided.gateStatus, 'approve');
+  const registry = await readJson(registryPaths(workspace, projectId).registryFile);
+  assert.equal(registry.gateStatus, 'approve');
+  // 门禁包裁决标记含 rulingRef(可追溯、可回放)。
+  const gateFile = await readFile(decided.gatePath, 'utf8');
+  assert.ok(gateFile.includes('rpc-9f3a2b1c'), '裁决标记应记录 rulingRef');
+});
+
+test('project_gate:approve 文本形态 rulingRef(裁决文件路径)通过(两通道兼容·子项 b)', async (t) => {
+  const { workspace, ctx, projectId } = await registerMini(t);
+  const context = sessionContext(workspace);
+  const gateTool = getTool(ctx, 'project_gate');
+  await getTool(ctx, 'project_advance').execute({ projectId }, context);
+  await gateTool.execute({ projectId, stageId: 'review', action: 'present', package: { summary: 's' } }, context);
+  const decided = await gateTool.execute({
+    projectId, stageId: 'review', action: 'decide',
+    decision: { verdict: 'approve', rulingRef: 'E:\\ws\\kr-x\\.dsh-project\\gates\\02-spec-gate.md' },
+  }, context);
+  assert.equal(decided.gateStatus, 'approve');
+});
+
+test('project_gate:approve 兜底形态 rulingRef(裁决书整段原文摘录)通过(书面补充裁决)', async (t) => {
+  const { workspace, ctx, projectId } = await registerMini(t);
+  const context = sessionContext(workspace);
+  const gateTool = getTool(ctx, 'project_gate');
+  await getTool(ctx, 'project_advance').execute({ projectId }, context);
+  await gateTool.execute({ projectId, stageId: 'review', action: 'present', package: { summary: 's' } }, context);
+  const decided = await gateTool.execute({
+    projectId, stageId: 'review', action: 'decide',
+    decision: { verdict: 'approve', rulingRef: '裁决原文:approve 方案 1(帧=rpcId,文本=裁决文件路径),MANUAL_TEXT 写入,兼容对照用例补显式兼容单测;继续 build' },
+  }, context);
+  assert.equal(decided.gateStatus, 'approve');
+});
+
+test('project_gate:卡点 resolve / revise / present 不受 rulingRef 影响(AC1-3 + 兼容)', async (t) => {
+  const { workspace, ctx, projectId } = await registerMini(t);
+  const context = sessionContext(workspace);
+  const gateTool = getTool(ctx, 'project_gate');
+  const blockTool = getTool(ctx, 'project_block');
+  // present 不受影响(无 rulingRef 正常呈递)。
+  await getTool(ctx, 'project_advance').execute({ projectId }, context); // → review
+  const present = await gateTool.execute({ projectId, stageId: 'review', action: 'present', package: { summary: 's' } }, context);
+  assert.equal(present.gateStatus, 'pending');
+  // revise 不受影响(无 rulingRef 正常裁决)。
+  const revised = await gateTool.execute({
+    projectId, stageId: 'review', action: 'decide',
+    decision: { verdict: 'revise', reviseTo: 'do', comment: '返工' },
+  }, context);
+  assert.equal(revised.gateStatus, 'revise');
+  // 卡点 resolve 不受影响(无 rulingRef 正常解卡)。
+  const block = await blockTool.execute({
+    projectId, action: 'report', category: 'other', reason: '测试卡点', options: ['a'], recommendation: 'r',
+  }, context);
+  const resolved = await blockTool.execute({ projectId, action: 'resolve', blockerId: block.blocker.id, resolution: '用户裁决:继续' }, context);
+  assert.equal(resolved.blocker.status, 'resolved');
+});
+
 test('project_advance:最后阶段无 appendStages = 结项(delivered);appendStages 开新迭代;终态拒绝', async (t) => {
   const { workspace, ctx, projectId } = await registerMini(t);
   const context = sessionContext(workspace);
@@ -864,7 +948,7 @@ test('project_advance:最后阶段无 appendStages = 结项(delivered);appendSta
     'gate 阶段未呈递(gateStatus=null)拒绝推进',
   );
   await getTool(ctx, 'project_gate').execute({ projectId, stageId: 'final-gate', action: 'present', package: { summary: '终审呈递' } }, context);
-  await getTool(ctx, 'project_gate').execute({ projectId, stageId: 'final-gate', action: 'decide', decision: { verdict: 'approve' } }, context);
+  await getTool(ctx, 'project_gate').execute({ projectId, stageId: 'final-gate', action: 'decide', decision: { verdict: 'approve', rulingRef: 'rpc-test-final' } }, context);
   const done = await getTool(ctx, 'project_advance').execute({ projectId }, context);
   assert.equal(done.delivered, true, '最后阶段无 appendStages 的推进 = 结项');
   assert.equal(done.state, 'delivered');

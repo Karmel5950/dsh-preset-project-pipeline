@@ -150,6 +150,7 @@ import {
   normalizeSedimentation,
   sedimentThresholdMet,
   returnHashOf,
+  validateRulingRef,
 } from './project-lib.mjs';
 
 export const name = 'project-pipeline-registry';
@@ -412,7 +413,12 @@ function decisionSection(verdict, decision, now) {
     `- 意见:${decision.comment ?? '(无)'}`,
   ];
   if (verdict === 'revise') lines.push(`- 返工目标:${decision.reviseTo}`);
-  const marker = { verdict, ...(verdict === 'revise' ? { reviseTo: decision.reviseTo } : {}) };
+  if (verdict === 'approve' && decision.rulingRef) lines.push(`- 授权源(rulingRef):${decision.rulingRef}`);
+  const marker = {
+    verdict,
+    ...(verdict === 'revise' ? { reviseTo: decision.reviseTo } : {}),
+    ...(verdict === 'approve' && decision.rulingRef ? { rulingRef: decision.rulingRef } : {}),
+  };
   lines.push('', `<!-- dsh-project:gate-decision ${JSON.stringify(marker)} -->`, '');
   return lines.join('\n');
 }
@@ -1232,7 +1238,7 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
       const decision = args.decision;
       if (!isPlainObject(decision)) throw new Error(`${name}/project_gate: decide 需要 decision 对象`);
       for (const key of Object.keys(decision)) {
-        if (!['verdict', 'comment', 'reviseTo'].includes(key)) {
+        if (!['verdict', 'comment', 'reviseTo', 'rulingRef'].includes(key)) {
           throw new Error(`${name}/project_gate: decision 含未知键 "${key}"`);
         }
       }
@@ -1242,6 +1248,13 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
       }
       if (decision.comment !== undefined && typeof decision.comment !== 'string') {
         throw new Error(`${name}/project_gate: decision.comment 必须是字符串`);
+      }
+      if (verdict === 'approve') {
+        // 门禁授权源校验(kr-gate-auth,0.20.0):approve 必须携带主线程裁决指针(rulingRef)。
+        // 三形态(主线程定稿):帧通道=帧 rpcId / 文本通道=裁决文件路径 / 兜底=裁决书整段原文摘录;
+        // 机器可核对字段=非空字符串(前缀/路径形态匹配即可,不做内容真实性追溯)。
+        const ruling = validateRulingRef(decision.rulingRef);
+        if (!ruling.ok) throw new Error(`${name}/project_gate: ${ruling.error}`);
       }
       if (verdict === 'revise') {
         if (typeof decision.reviseTo !== 'string' || decision.reviseTo.length === 0) {
@@ -2265,6 +2278,15 @@ SPEC(clarify 阶段)必须含「可行性分析」章,五维逐条给结论(可�
 - **r4 语义保持**:前置化是路由提前,不是验收口径变更;真机项仍由用户侧 blocking 执行,不得以静态放行替代。
 - **存量采用路径**:新项目 clarify 即声明 acceptance-routing 块;存量项目(legacy/in-flight)自然迭代时不强制回填——块缺失不阻断交付,仅呈递包留观察行。
 
+### approve 授权源(0.20.0,kr-gate-auth)
+- **门禁 approve 必须携带主线程裁决指针(rulingRef)**,无指针的 approve 机械拒绝——门禁 approve 是用户否决点的核心,授权来源必须显式、可追溯。
+- **三形态(主线程定稿,方案 1 + 书面补充裁决,三选一允许组合)**:
+  - 帧通道(intake 帧 should 答复)= 帧 **rpcId**(天然指针,零约定,直接取用);
+  - 文本通道(drive 文本投递)= **裁决文件路径**(可追溯、可回放);
+  - 兜底(文本通道无落盘文件)= **裁决书整段原文摘录**(整段、非摘要句)。
+- **校验口径(机器可核对字段)**:rulingRef 非空字符串 + 前缀/路径形态匹配即可,不做内容真实性追溯(不验证 rpcId 存在/路径存在/原文真实);无 rulingRef → 拒绝并提示「门禁 approve 须引用主线程裁决指针(kr-gate-auth)」。
+- **不受影响**:卡点 resolve、revise、present 等其他动作不要求 rulingRef(仅收紧 approve)。
+
 ### 资源触点互斥声明(机制1,2026-08-30 流程补丁)
 - 每项目在 SPEC 声明「资源触点」(三要素:拟改文件路径[]/拟部署组件[]/需重启 bool;粒度到文件路径/组件名,允许目录级如「整个 ui/ 目录」);REQUIREMENT 尾部留指针行。
 - 协调者派活前对 active 项目清单做触点比对:读自己 SPEC 触点 → project_status 列全部 active → 逐个读其 SPEC 触点 → 冲突判定(同文件路径/同部署组件/同需重启窗口即冲突,目录级按包含关系)。
@@ -2472,7 +2494,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register({
     name: 'project_gate',
-    description: '门禁两步制:present 把摘要/材料/建议写成门禁包(gates/NN-<stageId>.md)并置 pending;decide 记录用户裁决(approve/revise/reject)——revise 必给 reviseTo(work 阶段 id),reject 使项目终态。stageId 必须是当前阶段。**delivery-gate present 机械核对(0.16.0)**:读 SPEC.md 解析 acceptance-routing 结构化字段,校验 AC 对照表路由声明(四类真机触发类须声明 user-blocking);块存在 → 非法拒绝呈递;块缺失(存量/未声明)→ 不拒绝,呈递包加观察行。',
+    description: '门禁两步制:present 把摘要/材料/建议写成门禁包(gates/NN-<stageId>.md)并置 pending;decide 记录用户裁决(approve/revise/reject)——revise 必给 reviseTo(work 阶段 id),reject 使项目终态。stageId 必须是当前阶段。**approve 授权源(0.20.0,kr-gate-auth)**:approve 必须携带 decision.rulingRef(主线程裁决指针,三形态:帧通道=帧 rpcId / 文本通道=裁决文件路径 / 兜底=裁决书整段原文摘录),无指针机械拒绝。**delivery-gate present 机械核对(0.16.0)**:读 SPEC.md 解析 acceptance-routing 结构化字段,校验 AC 对照表路由声明(四类真机触发类须声明 user-blocking);块存在 → 非法拒绝呈递;块缺失(存量/未声明)→ 不拒绝,呈递包加观察行。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -2497,6 +2519,7 @@ export function apply(ctx, config = {}) {
             verdict: { type: 'string', enum: ['approve', 'revise', 'reject'], description: '用户裁决结论。' },
             comment: { type: 'string', description: '用户意见原文。' },
             reviseTo: { type: 'string', description: 'revise 时必给:要退回的 work 阶段 id。' },
+            rulingRef: { type: 'string', description: 'approve 必给:主线程裁决指针(三形态:帧通道=帧 rpcId / 文本通道=裁决文件路径 / 兜底=裁决书整段原文摘录);无指针的 approve 机械拒绝。' },
           },
           required: ['verdict'],
         },

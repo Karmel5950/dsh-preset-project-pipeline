@@ -2306,6 +2306,32 @@ export function validateAcceptanceRouting(entries) {
   return errors.length === 0 ? { ok: true, errors: [] } : { ok: false, errors };
 }
 
+// ── 门禁授权源校验(kr-gate-auth,0.20.0,2026-09-05)────────────────────────
+// project_gate approve 强制携带主线程裁决指针(rulingRef)。三形态(主线程定稿,
+// 方案 1 + 书面补充裁决,三选一允许组合):
+//   帧通道(intake 帧 should 答复)= 帧 rpcId(天然指针,零约定,直接取用);
+//   文本通道(drive 文本投递)= 裁决文件路径(可追溯、可回放);
+//   兜底(文本通道无落盘文件)= 裁决书整段原文摘录(整段、非摘要句)。
+// 校验口径=机械可判定:rulingRef 非空字符串 + 前缀/路径形态匹配即可,不做内容
+// 真实性追溯(不验证 rpcId 存在/路径存在/原文真实)。纯函数、零 npm import、只增不改。
+
+/**
+ * 校验门禁 approve 的授权源指针(rulingRef,纯函数,AC1 单测锁定)。
+ * 合法形态(主线程定稿,三选一允许组合):
+ *   - 帧通道 = 帧 rpcId(天然指针,零约定,直接取用);
+ *   - 文本通道 = 裁决文件路径(可追溯、可回放);
+ *   - 兜底 = 裁决书整段原文摘录(文本通道无落盘文件时,整段、非摘要句)。
+ * 三形态均为非空字符串 → 机器可核对字段 = rulingRef 非空字符串(前缀/路径形态
+ * 匹配即可,不做内容真实性追溯)。
+ * 返回 { ok: true } 或 { ok: false, error }。
+ */
+export function validateRulingRef(rulingRef) {
+  if (typeof rulingRef !== 'string' || rulingRef.trim().length === 0) {
+    return { ok: false, error: '门禁 approve 须引用主线程裁决指针(kr-gate-auth):rulingRef 必填(非空字符串,帧通道=帧 rpcId / 文本通道=裁决文件路径 / 兜底=裁决书整段原文摘录)' };
+  }
+  return { ok: true };
+}
+
 // ── 批量沉淀机制(kr-sediment-batch,0.18.0,2026-09-04)──────────────────────
 // 计数触发:每 N 个项目交付(N 默认 10,workspace 级可调,并入 audit-rules.json meta 段
 // sedimentation:{enabled,everyNDelivered},免部署生效)自动登记一个专门沉淀项目。

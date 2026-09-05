@@ -60,6 +60,7 @@ import {
   ACCEPTANCE_TRIGGER_CLASSES,
   parseAcceptanceRouting,
   validateAcceptanceRouting,
+  validateRulingRef,
   DEFAULT_SEDIMENT_THRESHOLD,
   DEFAULT_SEDIMENTATION,
   SEDIMENT_FLOW_TEMPLATE,
@@ -853,6 +854,24 @@ test('validateAcceptanceRouting:缺声明 / 错路由 → 拒绝(AC1)', () => {
 test('validateAcceptanceRouting:无 trigger(模型可验证)route 可为 model-verifiable 或 user-blocking', () => {
   assert.equal(validateAcceptanceRouting([{ ac: 'AC1', route: 'model-verifiable' }]).ok, true);
   assert.equal(validateAcceptanceRouting([{ ac: 'AC1', route: 'user-blocking' }]).ok, true, '无 trigger 也可声明 user-blocking(用户主动)');
+});
+
+// ── 门禁授权源校验(kr-gate-auth,0.20.0):validateRulingRef 纯函数 ──
+
+test('validateRulingRef:非空字符串通过(帧 rpcId / 裁决文件路径 / 原文摘录三形态)(AC1 happy path)', () => {
+  assert.deepEqual(validateRulingRef('rpc-9f3a2b1c'), { ok: true }, '帧 rpcId 形态通过');
+  assert.deepEqual(validateRulingRef('E:\\ws\\kr-x\\.dsh-project\\gates\\02-spec-gate.md'), { ok: true }, '裁决文件路径形态通过');
+  assert.deepEqual(validateRulingRef('裁决文件路径/相对路径'), { ok: true }, '相对路径形态通过');
+  assert.deepEqual(validateRulingRef('裁决原文:approve 方案 1(帧=rpcId,文本=裁决文件路径),MANUAL_TEXT 写入,兼容对照用例补显式兼容单测;继续 build'), { ok: true }, '兜底=裁决书整段原文摘录形态通过');
+});
+
+test('validateRulingRef:空/非字符串/空白 → 拒绝(AC1)', () => {
+  assert.equal(validateRulingRef(undefined).ok, false, 'undefined → 拒绝');
+  assert.equal(validateRulingRef(null).ok, false, 'null → 拒绝');
+  assert.equal(validateRulingRef('').ok, false, '空串 → 拒绝');
+  assert.equal(validateRulingRef('   ').ok, false, '空白 → 拒绝');
+  assert.equal(validateRulingRef(42).ok, false, '非字符串 → 拒绝');
+  assert.ok(validateRulingRef(undefined).error.includes('门禁 approve 须引用主线程裁决指针(kr-gate-auth)'), '错误信息含拒绝提示语');
 });
 
 // ── 批量沉淀机制(0.18.0,kr-sediment-batch):阈值检测纯函数 ──

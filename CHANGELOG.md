@@ -1,3 +1,16 @@
+## [0.20.0] - 2026-09-05
+
+门禁授权源校验(kr-gate-auth 交付;背景:kr-self-audit spec-gate 期间,协调者引用主线程在卡点裁决里的措辞自行 approve 了门禁——越权边缘。门禁 approve 是用户否决点的核心,授权来源必须显式、可追溯)。
+
+- **project_gate approve 强制携带主线程裁决指针(rulingRef)(project-registry)**:无 rulingRef 的 approve 机械拒绝并提示「门禁 approve 须引用主线程裁决指针(kr-gate-auth)」;卡点 resolve、revise、present 等其他动作不受影响(仅收紧 approve)。
+- **三形态(主线程定稿,方案 1 + 书面补充裁决,三选一允许组合)**:帧通道(intake 帧 should 答复)= 帧 rpcId(天然指针,零约定);文本通道(drive 文本投递)= 裁决文件路径(可追溯、可回放);兜底(文本通道无落盘文件)= 裁决书整段原文摘录(整段、非摘要句)。校验口径=机械可判定:rulingRef 非空字符串 + 前缀/路径形态匹配即可,不做内容真实性追溯(project-lib.validateRulingRef 纯函数)。
+- **裁决标记可追溯**:approve 裁决写入门禁包时记录 rulingRef(decisionSection 扩展,机器可回放)。
+- **MANUAL_TEXT 增「approve 授权源」小节**(文本不含 {{template}} 变量,prompt-render-template-var-guard)。
+- 版本 0.19.0 → **0.20.0(minor)**:新功能(门禁授权源强制校验)。
+- 测试:project-lib 增 validateRulingRef 纯函数单测(三形态 happy path + 空/非字符串拒绝);project-registry 增 AC1 三项(无 rulingRef 拒绝 / 合法通过 / resolve 不受影响)+ 三形态兼容单测(帧 rpcId / 文本裁决文件路径 / 兜底原文摘录在 approve 下均自然通过,resolve/revise 不受影响)。覆盖仓库全部相关测试文件(selftest-must-cover-repo-test-files),新增逻辑分支均有 happy path 测试(test-coverage-happy-path)。
+- **AC2 真机(r4)**:下个自然项目的门禁以带指针方式 approve 通过,由用户侧 blocking 执行;流水线只做单测/桩预演核对。
+- 触点:presets/project-pipeline/(project-lib.mjs、project-registry.mjs、test/、package.json、CHANGELOG)→ **r2 交付 deliverables/ + APPLY.md** + **r3 deploy 至 IN SYNC + 重启**(重启窗口并入攒批)。
+
 ## [0.19.0] - 2026-09-05
 
 流水线控制面——设置 UI 与每角色模型分层(kr-control-plane 交付;背景:流水线策略零 UI、模型配置底座三层原生支持但零使用,按角色分层是最大降本手段)。
