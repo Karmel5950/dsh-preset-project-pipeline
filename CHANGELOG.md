@@ -1,3 +1,15 @@
+## [0.19.0] - 2026-09-05
+
+流水线控制面——设置 UI 与每角色模型分层(kr-control-plane 交付;背景:流水线策略零 UI、模型配置底座三层原生支持但零使用,按角色分层是最大降本手段)。
+
+> **⚠ 模型选型被用户模型成本红线否决(2026-09-05)**:本版本原含主力档模型选型,经用户红线指令(禁止使用 deepseek-v4-flash:0731 以外的任何模型;使用其他模型必须获得用户逐案同意)否决,已按 R1~R4 减法修订删除全部模型选型内容。五角色默认一律继承全局默认 deepseek-v4-flash:0731,preset 角色清单不写 model 字段;模型分配 UI 功能保留(用户在设置 UI 手动改模型 = 用户亲自操作即用户同意)。
+
+- **roles/*.json 不写 model 字段(五角色继承全局默认 deepseek-v4-flash:0731)**:preset 角色清单不再声明任何模型;architect/product persona 保留【模型约束】句(读大 SPEC 须配大窗模型,AC-B5/B-6,机制提示不绑定具体选型)。
+- **toolface 审计网新增 `checkModelPassthrough`(toolface-lib.mjs,AC-B3)**:对每角色断言 compileSubagent 的 model→agentOptions 映射与声明 model 一致,防「声明了但没透传」。
+- **toolface 审计网新增 `checkModelApproval`(toolface-lib.mjs,防伪造硬约束 AC)**:任何非默认模型声明须携带用户批准标记(设置 UI 操作记录),流水线角色不得自行变更模型——防伪造维度延伸到模型配置。
+- **project-hub 宿主插件(随 kr-control-plane 交付,见 APPLY.md)**:新增「流水线设置」tab(块 A 策略编辑 + 块 B 每角色模型 + 沉淀凭证展示位),API 护栏 AC-A2,写前备份 .trash + 原子写;`writeRoleModel` 写 workspace 覆盖时打用户批准标记(modelApproval)。
+- 版本 0.18.1 → **0.19.0(minor)**:新功能(模型分层机制 + 设置 UI;选型经红线否决后减法修订)。
+
 ## [0.18.1] - 2026-09-05
 
 审计执行凭证机制化(kr-audit-voucher 交付;背景:sediment-r1 事件暴露——角色声称「审计轮已跑 13 条发现」时,唯一核验手段是主线程人肉考古会话历史,且考古脚本本身还有字段路径陷阱(差点误判)。核验依赖人肉 = 不可扩展)。

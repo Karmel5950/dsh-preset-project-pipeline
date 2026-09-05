@@ -192,6 +192,75 @@ export function checkForbidden(rolesAllow, cordisAllow, forbidden = FORBIDDEN) {
 }
 
 /**
+ * 复刻 compileSubagent 的 model→agentOptions 映射(与 project-roles.mjs 同构)。
+ * manifest.model 存在时透传 provider/model/maxTokens;无 model → null。
+ */
+export function compileModelAgentOptions(manifest) {
+  if (!manifest || typeof manifest !== 'object' || !manifest.model || typeof manifest.model !== 'object') return null;
+  const agentOptions = {};
+  for (const key of ['provider', 'model', 'maxTokens']) {
+    if (manifest.model[key] !== undefined) agentOptions[key] = manifest.model[key];
+  }
+  return Object.keys(agentOptions).length > 0 ? agentOptions : null;
+}
+
+/**
+ * 模型透传核对(AC-B3,kr-control-plane):对每角色断言 compileSubagent 的
+ * model→agentOptions 映射与声明 model 一致(provider/model 非空且透传)。
+ * 防「声明了但没透传」。roles 条目可为 { id, manifest } 或直接 manifest。
+ * 返回漂移数组(空 = 一致)。
+ */
+export function checkModelPassthrough(roles) {
+  const drifts = [];
+  for (const r of roles || []) {
+    if (!r || typeof r !== 'object' || typeof r.id !== 'string') continue;
+    const manifest = r.manifest && typeof r.manifest === 'object' ? r.manifest : r;
+    const declared = manifest.model && typeof manifest.model === 'object' ? manifest.model : null;
+    const compiled = compileModelAgentOptions(manifest);
+    if (declared) {
+      if (!compiled) {
+        drifts.push({ layerA: 'L1', layerB: 'spawn', role: manifest.id, tool: 'model', direction: 'real-missing',
+          detail: `roles/${manifest.id}.json 声明 model 但 compileSubagent 未透传 agentOptions` });
+        continue;
+      }
+      if (compiled.provider !== declared.provider || compiled.model !== declared.model) {
+        drifts.push({ layerA: 'L1', layerB: 'spawn', role: manifest.id, tool: 'model', direction: 'declared-extra',
+          detail: `roles/${manifest.id}.json model 声明 ${declared.provider}/${declared.model},compileSubagent 透传 ${compiled.provider}/${compiled.model}` });
+      }
+    } else if (compiled) {
+      drifts.push({ layerA: 'L1', layerB: 'spawn', role: manifest.id, tool: 'model', direction: 'real-extra',
+        detail: `roles/${manifest.id}.json 未声明 model 但 compileSubagent 透传了 agentOptions` });
+    }
+  }
+  return drifts;
+}
+
+/**
+ * 防伪造硬约束核对(AC,kr-control-plane 红线改道 R3):任何非默认模型声明须携带
+ * 用户批准标记(modelApproval,设置 UI 操作记录),流水线角色不得自行变更模型。
+ * 对每角色 manifest:声明了 model 但缺 modelApproval 标记 → 伪造漂移(direction='forged')。
+ * 唯一合法写模型路径 = 设置 UI writeRoleModel(打 modelApproval:{by:'user',ts});直接改
+ * 文件/角色自行改模型 = 无标记 → 判伪造。roles 条目可为 { id, manifest } 或直接 manifest。
+ * 返回漂移数组(空 = 一致)。
+ */
+export function checkModelApproval(roles) {
+  const drifts = [];
+  for (const r of roles || []) {
+    if (!r || typeof r !== 'object' || typeof r.id !== 'string') continue;
+    const manifest = r.manifest && typeof r.manifest === 'object' ? r.manifest : r;
+    const declared = manifest.model && typeof manifest.model === 'object' ? manifest.model : null;
+    if (!declared) continue; // 未声明模型(继承全局默认)无需批准标记
+    const approval = manifest.modelApproval;
+    const hasApproval = approval !== null && typeof approval === 'object' && approval.by === 'user' && typeof approval.ts === 'string' && approval.ts.length > 0;
+    if (!hasApproval) {
+      drifts.push({ layerA: 'L1', layerB: 'approval', role: manifest.id, tool: 'model', direction: 'forged',
+        detail: `roles/${manifest.id}.json 声明非默认模型 ${declared.provider}/${declared.model} 但缺用户批准标记 modelApproval(设置 UI 操作记录)→ 流水线角色不得自行变更模型,判为伪造` });
+    }
+  }
+  return drifts;
+}
+
+/**
  * 统一核对入口(纯函数):输入 roles 清单 + agent.cordis.yml 文本 + 真实工具面,
  * 输出结构化漂移报告。可被入口脚本 / harvest / 审计回路调用。
  * 返回 { ok, drifts, summary: { total, byPair }, freeze }。
