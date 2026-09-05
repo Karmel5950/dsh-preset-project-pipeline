@@ -71,6 +71,9 @@ import {
   lastSedimentRegistrationAt,
   normalizeSedimentation,
   sedimentThresholdMet,
+  canonicalStringify,
+  sha256Hex,
+  returnHashOf,
 } from '../plugins/project-lib.mjs';
 
 // ── 桩具 ────────────────────────────────────────────────────────────────────
@@ -1005,4 +1008,60 @@ test('sedimentThresholdMet:阈值非法/缺省 → 回退默认 N=10;空注册�
   assert.equal(sedimentThresholdMet([], 'x').threshold, DEFAULT_SEDIMENT_THRESHOLD, 'N 非整数回退默认');
   assert.equal(sedimentThresholdMet(null, 3).triggered, false, '空注册表不触发');
 });
+
+// ── 审计执行凭证(kr-audit-voucher,0.18.1):canonicalStringify / sha256Hex / returnHashOf ──
+
+test('canonicalStringify:递归排序对象键,同值同串(AC2 稳定序列化)', () => {
+  const a = { b: 1, a: [2, { d: 3, c: 4 }], z: 'x' };
+  const b = { z: 'x', a: [2, { c: 4, d: 3 }], b: 1 };
+  assert.equal(canonicalStringify(a), canonicalStringify(b), '键序不同但值相同 → 同串');
+  assert.equal(canonicalStringify({ x: 1 }), '{"x":1}');
+  assert.equal(canonicalStringify([1, 2]), '[1,2]');
+  assert.equal(canonicalStringify(null), 'null');
+  assert.equal(canonicalStringify(undefined), 'null', 'undefined → null(与 JSON 数组/对象一致)');
+  assert.equal(canonicalStringify('a'), '"a"');
+  assert.equal(canonicalStringify(42), '42');
+});
+
+test('sha256Hex:node 内置 crypto SHA-256,零新依赖,确定性', () => {
+  const h1 = sha256Hex('hello');
+  const h2 = sha256Hex('hello');
+  assert.equal(h1, h2, '同输入同哈希');
+  assert.match(h1, /^[0-9a-f]{64}$/, 'SHA-256 十六进制 64 位');
+  // 已知向量:sha256('hello') 的规范值。
+  assert.equal(h1, '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824');
+});
+
+test('returnHashOf:同返回体重放哈希一致(AC2)', () => {
+  const body = {
+    action: 'run',
+    status: 'done',
+    findings: [{ id: 'O1-x', observe: 'O1', category: 'test-env', title: 't', summary: 's', value: { a: 1 }, status: 'supported', evidence: [{ file: 'f', ref: '1' }] }],
+    obsErrors: [],
+    actions: [],
+    dropped: [],
+    executed: [],
+    notes: [],
+    trailPath: '/tmp/ws/.dsh-library/audit-trail.json',
+    rulesUsed: ['R-test'],
+  };
+  const h1 = returnHashOf(body);
+  // 键序打乱 + 嵌套对象键序打乱 → 同哈希(稳定序列化)。
+  const shuffled = {
+    rulesUsed: ['R-test'],
+    trailPath: '/tmp/ws/.dsh-library/audit-trail.json',
+    notes: [],
+    executed: [],
+    dropped: [],
+    actions: [],
+    obsErrors: [],
+    findings: [{ status: 'supported', value: { a: 1 }, summary: 's', title: 't', category: 'test-env', observe: 'O1', id: 'O1-x', evidence: [{ ref: '1', file: 'f' }] }],
+    status: 'done',
+    action: 'run',
+  };
+  assert.equal(returnHashOf(shuffled), h1, '同返回体重放(键序不同)哈希一致');
+  // 内容变化 → 哈希变化。
+  assert.notEqual(returnHashOf({ ...body, status: 'rejected' }), h1, '内容变化哈希变化');
+});
+
 

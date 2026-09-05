@@ -21,7 +21,7 @@ import { apply } from '../plugins/project-registry.mjs';
 const HERE = dirname(fileURLToPath(import.meta.url));
 // 生产路径:dsh-runtime 与 plugindev 平级(dsh/ 仓库根)。test → project-pipeline → presets → plugindev → dsh。
 // 自测 harness 路径:test → project-pipeline → presets → _selftest → kr-sediment-batch → pipeline-ws → plugindev → dsh。
-// 不硬编码层级:从本目录向上探测含 dsh-runtime 的祖先,生产与自测两种布局通用(round2 交付曾硬编码自测 7 层导致生产 3 例红)。
+// 不硬编码层级:从本目录向上探测含 dsh-runtime 的祖先,生产与自测两种布局通用(交付已三次带回硬编码版)。
 let runtimeProbe = HERE;
 for (let i = 0; i < 12 && !existsSync(join(runtimeProbe, 'dsh-runtime', 'node_modules', '@deepseek-ai', 'dsh-system-prompt')); i++) runtimeProbe = dirname(runtimeProbe);
 const RUNTIME_ROOT = join(runtimeProbe, 'dsh-runtime');

@@ -1,3 +1,22 @@
+## [0.18.1] - 2026-09-05
+
+审计执行凭证机制化(kr-audit-voucher 交付;背景:sediment-r1 事件暴露——角色声称「审计轮已跑 13 条发现」时,唯一核验手段是主线程人肉考古会话历史,且考古脚本本身还有字段路径陷阱(差点误判)。核验依赖人肉 = 不可扩展)。
+
+- **project_audit(action=run) 执行后自动写审计执行凭证(project-registry)**:
+  - 凭证形状 `{ id, type:'audit-run-voucher', ts, findings, actions, deduped, callerSessionId, returnHash }`(threshold? 仅当有阈值时,当前 run 无阈值故省略)。
+  - **0 actions 也写凭证**——「跑了但无事发生」与「没跑」可区分(unsupported-degradation 纪律的机制化承载)。
+  - 凭证 id = `audit-run-voucher-<stamp>`(stamp = ts 去 `[:.]`),可被结项包/门禁引用;主线程核验=比对凭证 vs 会话记录,机械可查。
+  - pwsh/直写绕过工具的路径天然无凭证,绕行即裸奔可见(顺带堵住 0.18.0 期间直写重建类行为)。
+- **returnHash(project-lib 只增不改,零 npm import)**:
+  - `canonicalStringify`(递归排序对象键的稳定序列化)/ `sha256Hex`(node 内置 crypto SHA-256)/ `returnHashOf`(工具返回体摘要)。
+  - 序列化口径=canonicalStringify,同返回体重放哈希一致(AC2)。
+- **flows/sediment-flow.json**:harvest 注记同步为 workspace 修正版(显式点名 project_audit + project_harvest、禁止 pwsh/直写绕行、0 actions 也要记录)——workspace 覆盖版已在线上生效,本次落进源码随版本固化。
+- **MANUAL_TEXT 工具速查补 project_audit 凭证句**(文本不含 {{template}} 变量,prompt-render-template-var-guard)。
+- 版本 0.18.0 → **0.18.1(patch)**:修复(审计核验依赖人肉)+ 凭证。
+- 测试:project-lib 增 `canonicalStringify`/`sha256Hex`/`returnHashOf` 纯函数单测(稳定序列化/同值同串/同返回体重放哈希一致);project-registry 增 AC1(凭证字段完整 + 0 actions 也写凭证)与 AC2(哈希可复算)单测。覆盖仓库全部相关测试文件(selftest-must-cover-repo-test-files),新增逻辑分支均有 happy path 测试(test-coverage-happy-path)。
+- **AC3 真机(r4)**:部署后真实跑一轮 project_audit,凭证出现且哈希与会话记录一致,由用户侧 blocking 执行;流水线只做单测/桩预演核对。
+- 触点:presets/project-pipeline/(project-lib.mjs、project-registry.mjs、flows/sediment-flow.json、test/、package.json、CHANGELOG)→ **r2 交付 deliverables/ + APPLY.md** + **r3 deploy 至 IN SYNC + 重启**(重启窗口并入攒批)。
+
 ## [0.18.0] - 2026-09-04
 
 批量沉淀机制:每 N 项交付触发专门沉淀流程(kr-sediment-batch 交付;背景:0.15.0 设计的「harvest 顺带跑一轮 project_audit」是 MANUAL_TEXT 纪律,连续四次 harvest 跳过,自主审计飞轮转不起来——AC5 见证(无人工输入的自主立项)始终无法发生。用户决策:放弃每次沉淀,改为批量触发)。

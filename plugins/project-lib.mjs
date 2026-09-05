@@ -64,6 +64,7 @@
 //     route 必须 user-blocking(r4 语义:真机项由用户侧 blocking 执行,不得以静态放行替代);
 //     只增不改、零 npm import。
 
+import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -1266,6 +1267,33 @@ export async function readAuditTrail(workspaceDir) {
   }
   if (!Array.isArray(parsed)) return { trail: [], error: 'audit-trail.json 须是数组' };
   return { trail: parsed };
+}
+
+// ── 审计执行凭证(kr-audit-voucher,0.18.1,2026-09-05)────────────────────────
+// project_audit(action=run) 执行后自动写一条 audit-run-voucher 凭证到 audit-trail
+// (append-only,不替换既有动作条目语义)。0 actions 也写凭证——「跑了但无事发生」与
+// 「没跑」可区分。returnHash 用 node 内置 crypto(SHA-256)对工具返回体做摘要,零新依赖;
+// 序列化口径=canonicalStringify(递归排序对象键),保证同返回体重放哈希一致(AC2)。
+
+/** 稳定序列化(AC2):递归排序对象键,保证同值同串。undefined → 'null'(与 JSON 数组/对象一致)。 */
+export function canonicalStringify(value) {
+  if (value === null || value === undefined) return 'null';
+  if (Array.isArray(value)) return `[${value.map(canonicalStringify).join(',')}]`;
+  if (typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${canonicalStringify(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/** SHA-256 十六进制摘要(node 内置 crypto,零新依赖)。 */
+export function sha256Hex(text) {
+  return createHash('sha256').update(String(text), 'utf8').digest('hex');
+}
+
+/** 工具返回体 SHA-256 摘要(AC2):序列化口径=canonicalStringify,同返回体重放哈希一致。 */
+export function returnHashOf(returnBody) {
+  return sha256Hex(canonicalStringify(returnBody));
 }
 
 /** audit-rules 路径(<workspace>/.dsh-library/audit-rules.json)。 */

@@ -35,6 +35,7 @@ import {
   validateRole,
   validateStageList,
   writeJson,
+  returnHashOf,
 } from '../plugins/project-lib.mjs';
 import { makeStubCtx } from '../../../toolkit/stub-ctx.mjs';
 
@@ -2096,4 +2097,49 @@ test('advance-to-delivered:MANUAL_TEXT 手册段含批量沉淀机制小节', as
   assert.ok(section.text.includes('sedimentation'), '手册段应含 sedimentation');
   assert.ok(section.text.includes('sediment-flow'), '手册段应含 sediment-flow 模板');
   assert.ok(section.text.includes('已达沉淀阈值'), '手册段应含触发指令文本');
+});
+
+// ── 审计执行凭证(kr-audit-voucher,0.18.1):AC1 凭证字段完整 + 0 actions 也写 ──
+
+test('project_audit run:写 audit-run-voucher 凭证,字段完整 + 0 actions 也写(AC1)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace, 'audit-session-1');
+  const result = await getTool(ctx, 'project_audit').execute({ action: 'run' }, context);
+  assert.equal(result.action, 'run');
+  assert.equal(result.status, 'done');
+  // 无 audit-rules → 0 actions(「跑了但无事发生」)。
+  assert.equal(result.actions.length, 0, '无规则 → 0 actions');
+  // 读 trail,末条应为凭证(append-only,凭证只是追加,不替换既有动作条目语义)。
+  const trail = await readJson(join(workspace, '.dsh-library', 'audit-trail.json'));
+  assert.ok(Array.isArray(trail), 'trail 仍是数组(append-only)');
+  const voucher = trail[trail.length - 1];
+  assert.equal(voucher.type, 'audit-run-voucher', '末条为凭证');
+  assert.match(voucher.id, /^audit-run-voucher-/, '凭证 id 前缀');
+  assert.ok(typeof voucher.ts === 'string' && voucher.ts.length > 0, 'ts 存在');
+  assert.ok(Array.isArray(voucher.findings), 'findings 数组');
+  assert.ok(Array.isArray(voucher.actions), 'actions 数组');
+  assert.equal(voucher.actions.length, 0, '0 actions 也写凭证');
+  assert.equal(typeof voucher.deduped, 'number', 'deduped 计数');
+  assert.equal(voucher.callerSessionId, 'audit-session-1', 'callerSessionId 来自调用会话');
+  assert.match(voucher.returnHash, /^[0-9a-f]{64}$/, 'returnHash 为 SHA-256 十六进制');
+});
+
+test('project_audit run:returnHash 可复算(AC2)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace, 'audit-session-2');
+  const result = await getTool(ctx, 'project_audit').execute({ action: 'run' }, context);
+  const trail = await readJson(join(workspace, '.dsh-library', 'audit-trail.json'));
+  const voucher = trail[trail.length - 1];
+  // 对返回体重放哈希 → 与凭证 returnHash 一致(AC2)。
+  assert.equal(returnHashOf(result), voucher.returnHash, '返回体重放哈希与凭证一致');
+});
+
+test('project_audit run:MANUAL_TEXT 手册段含审计执行凭证句', async () => {
+  const ctx = await mountPlugin();
+  const section = ctx.systemPrompt.items[0];
+  assert.ok(section.text.includes('audit-run-voucher'), '手册段应含 audit-run-voucher');
+  assert.ok(section.text.includes('returnHash'), '手册段应含 returnHash');
+  assert.ok(section.text.includes('0 actions 也写凭证'), '手册段应含 0 actions 也写凭证');
 });

@@ -82,6 +82,13 @@
 //   - (delivery-gate 第 1 轮 revise 返工,存量项目零影响)块缺失(存量/未声明)→ 不拒绝,
 //     跳过核对,呈递包加观察行「acceptance-routing 块缺失(存量/未声明),路由核对未执行」;
 //     块存在 → 严格校验(非法仍 throw);SPEC.md 文件缺失仍 throw(契约违例)。
+// 0.18.1 新增(审计执行凭证机制化 kr-audit-voucher,2026-09-05):
+//   - project_audit(action=run) 执行后自动写一条 audit-run-voucher 凭证到 audit-trail
+//     (append-only,不替换既有动作条目语义);0 actions 也写凭证(「跑了但无事发生」与
+//     「没跑」可区分);凭证含 type/ts/findings/actions/deduped/callerSessionId/returnHash
+//     (工具返回体 SHA-256 摘要,node 内置 crypto,零新依赖);凭证 id=audit-run-voucher-<stamp>
+//     可被结项包/门禁引用。pwsh/直写绕过工具的路径天然无凭证,绕行即裸奔可见。
+//   - MANUAL_TEXT 工具速查补 project_audit 凭证句。
 
 import { existsSync, readFileSync } from 'node:fs';
 import { appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
@@ -142,6 +149,7 @@ import {
   lastSedimentRegistrationAt,
   normalizeSedimentation,
   sedimentThresholdMet,
+  returnHashOf,
 } from './project-lib.mjs';
 
 export const name = 'project-pipeline-registry';
@@ -1828,7 +1836,8 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
       }
     }
 
-    return {
+    // 构建返回体(先于凭证:returnHash 对返回体做摘要,AC2 同返回体重放哈希一致)。
+    const result = {
       action: 'run',
       status: 'done',
       findings: obs.findings,
@@ -1840,6 +1849,25 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
       trailPath: trailFile,
       rulesUsed: rules.map((r) => r.id),
     };
+
+    // 审计执行凭证(kr-audit-voucher,0.18.1):run 执行后必写一条 audit-run-voucher 凭证
+    // 到 audit-trail(append-only,不替换既有动作条目语义)。0 actions 也写凭证——「跑了
+    // 但无事发生」与「没跑」可区分。凭证 id 可被结项包/门禁引用(主线程核验=比对凭证
+    // vs 会话记录,机械可查)。pwsh/直写绕过工具的路径天然无凭证,绕行即裸奔可见。
+    const voucherId = `audit-run-voucher-${stamp}`;
+    const voucher = {
+      id: voucherId,
+      type: 'audit-run-voucher',
+      ts,
+      findings: obs.findings,
+      actions: limited.kept,
+      deduped: result.dropped.length,
+      callerSessionId: sessionIdOf(context) ?? null,
+      returnHash: returnHashOf(result),
+    };
+    await appendTrail(voucher);
+
+    return result;
   }
 
   return { register, advance, gate, budget, status, block, harvest, audit };
@@ -2208,7 +2236,7 @@ const MANUAL_TEXT = `## 项目制交付速查(project-pipeline)
 9. project_status:不带 projectId 列出工作区全部项目(含未解决卡点数);带 projectId 看单项目详情(当前阶段/门禁态/预算聚合(含统一总 token)/SUMMARY 是否存在/卡点数)。
 10. role_list / role_show:查角色清单;role_show 返回可直接拷进 subagent 调用的参数(persona/toolFilter/agentOptions)与 workspaceNote。
 11. flow_list / flow_show:查流程模板(含 stageCount/stages),workspace 库覆盖 preset 自带。
-12. project_audit:自省审计回路。action=run 跑一轮审计(观察 O1~O6 → 规则表判定 → 去重限频 → 三档分流);action=status 查审计留痕与状态。rules 存 <workspace>/.dsh-library/audit-rules.json(规则归用户),留痕写 .dsh-library/audit-trail.json(append-only)。
+12. project_audit:自省审计回路。action=run 跑一轮审计(观察 O1~O6 → 规则表判定 → 去重限频 → 三档分流);action=status 查审计留痕与状态。rules 存 <workspace>/.dsh-library/audit-rules.json(规则归用户),留痕写 .dsh-library/audit-trail.json(append-only)。**run 执行后自动写一条 audit-run-voucher 凭证(0.18.1,kr-audit-voucher)**:含 type/ts/findings/actions/deduped/callerSessionId/returnHash(工具返回体 SHA-256 摘要);0 actions 也写凭证(「跑了但无事发生」与「没跑」可区分);凭证 id=audit-run-voucher-<stamp> 可被结项包/门禁引用;pwsh/直写绕过工具的路径天然无凭证,绕行即裸奔可见。
 
 ### spawn 纪律
 必须用 per-role 工具名(subagent_<role> / subagent_devhelper)spawn 角色;通用 subagent/subagent_fork 已不可见(机制保证)。

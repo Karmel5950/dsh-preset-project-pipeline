@@ -8,6 +8,6 @@
     { "id": "test", "type": "work", "role": "tester", "note": "独立验证不信任自测;无法真实验证的项如实 project_block,禁止静态替代放行" },
     { "id": "delivery-gate", "type": "gate", "title": "交付验收", "present": ["DELIVERY.md"], "note": "沉淀项目唯一门禁:用户侧裁决即最终验收;机械核对 AC 对照表路由声明(读 SPEC.md acceptance-routing;声明是纪律引导,核对只校验已声明项——块存在 → 四类真机触发类须声明 user-blocking,非法拒绝;块缺失(存量/未声明)→ 不拒绝,呈递包加观察行);含视觉/真实环境等无法模型验证的项须在此前列为用户侧 blocking" },
     { "id": "wrap", "type": "summary", "note": "结项总结从简:目标/结果/已知限制" },
-    { "id": "harvest", "type": "internalize", "note": "沉淀内化:审计轮产出留痕(AC5 见证)、失败模式聚合报告写 SUMMARY、lesson 库整固(harvest-merge/lesson-lifecycle)、回顾审计规则与消费路由;调 project_harvest rebuild-index 重建 lessons-index.json(保留 hits)" }
+    { "id": "harvest", "type": "internalize", "note": "沉淀内化(必须按以下顺序以工具真实执行,产出以工具返回为准写入 SUMMARY,禁止以 pwsh/写文件绕过工具或以自述代替):①调 project_audit(action=run) 执行审计轮,发现数/分流动作/去重限频结果原样记录;②调 project_harvest(rebuild-index) 重建 lessons-index.json(保留 hits、应用 stale 候选);③失败模式聚合报告写 SUMMARY;④lesson 库整固(harvest-merge/lesson-lifecycle 纪律);⑤回顾审计规则与消费路由。审计轮产出 0 动作时也须在 SUMMARY 记录「0 actions + 去重数」,工具返回即证据。" }
   ]
 }
