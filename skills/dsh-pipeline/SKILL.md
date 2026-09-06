@@ -13,22 +13,22 @@ description: 驱动 dsh 项目制流水线(project-pipeline preset):需求登记
 ## 0. 常量(本机地面真相,先核实再用)
 
 - 仓库根:`<仓库根>`(dsh 仓库的 git 根,示例来自作者环境;请替换为你本机的仓库根);流水线工作区示例 `plugindev/pipeline-ws/`
-- test 实例:`http://127.0.0.1:3081`(prod 3080 **禁止不受控直写**)
+- **单环境默认**:`http://127.0.0.1:3080`(dsh web 默认端口,单环境默认实例)。作者本机若显式开启双环境,dev 实例为 `http://127.0.0.1:3081`(见「维护者:双环境显式开启」)。
 - **intake 会话 = 每项目一个**(P0 一次性化,不再有全局固定会话作为工作面):
   - 从 `pipeline-ws/<projectId>/.dsh-project/REGISTRY.json` 的 `sessions` 取 `role==='intake'` 的 `sessionId`(register 时即 auto-record 入册)
-  - 新建项目 intake 会话:`node toolkit/pipeline-start.mjs --prompt <登记投递.md> --base-url http://127.0.0.1:3081`(输出 sessionId;权威来源仍是 REGISTRY.sessions)
+  - 新建项目 intake 会话:`node toolkit/pipeline-start.mjs --prompt <登记投递.md> --base-url http://127.0.0.1:3080`(输出 sessionId;权威来源仍是 REGISTRY.sessions;作者本机双环境用 `--base-url http://127.0.0.1:3081`)
   - 验证活性:drive 返回 HTTP 200 `accepted:true` 即在
 - 工具(都在 `plugindev/` 下执行,目录为作者环境示例;toolkit 依赖 sibling `dsh-runtime`,见仓库根 README「开发与维护者」):
-  - 投递:`node toolkit/pipeline-drive.mjs --session <id> --prompt <file.md>`(id 取本项目 REGISTRY.sessions 的 intake)
+  - 投递:`node toolkit/pipeline-drive.mjs --session <id> --prompt <file.md>`(id 取本项目 REGISTRY.sessions 的 intake;dev 内件默认指向作者 dev 实例 3081,外部单环境用户显式传 `--api http://127.0.0.1:3080`)
   - 监控:`node toolkit/pipeline-watch.mjs --session <id> --timeout-min 360 --ws-root <ws-root>`(示例来自作者环境;与会话 id 解耦,按 --ws-root 轮询 REGISTRY;--session 亦可传本项目 intake id)
-  - 建会投递:`node toolkit/pipeline-start.mjs --prompt <登记投递.md> --base-url http://127.0.0.1:3081`
+  - 建会投递:`node toolkit/pipeline-start.mjs --prompt <登记投递.md> --base-url http://127.0.0.1:3080`
 - 登记簿:`pipeline-ws/<projectId>/.dsh-project/REGISTRY.json`,判读字段:`state`(active/parked/delivered/rejected)、`stageIndex`、`gateStatus`(pending=待你裁决);**blockers 无 state 字段,open = 无 `resolvedAt`**;`sessions` 是以 `sessionId` 为键的对象(值含 `role`:`'intake'`/`'coordinator'`;主线程按 role 取键名即得会话 id)
 - 流程阶段(以各项目 FLOW.json / journal 编号为准):standard-flow(11 阶段)0 clarify → 1 spec-gate → 2 design → 3 mid-summary → **4 design-gate** → 5 build → 6 test → 7 accept → **8 delivery-gate** → 9 wrap → 10 harvest;adhoc(10 阶段,无 mid-summary)**delivery-gate=7**;lite(6 阶段,缺陷修复用)0 clarify → 1 build → 2 test → **3 delivery-gate** → 4 wrap → 5 harvest
 - 裁决库:`pipeline-ws/.dsh-library/rulings.json`(r1 视觉验收用户侧 blocking / r2 交付 handover / r3 deploy IN SYNC+重启 / r4 真实环境用户侧)——角色会自动引用,你裁决时同案同判
 
 ## 1. 登记新需求
 
-写投递文件(含用户原话逐字 + 地面真相 + 设计方向候选 + 验收/部署预判),**先经 `node toolkit/pipeline-start.mjs --prompt <登记投递.md>` 在 test 实例创建本项目专属 intake 会话并投递登记,再由该新会话(project-pipeline preset)自行 `project_register`**;本项目后续 drive/watch 的 `--session` 一律从 `REGISTRY.sessions` 取该项目 `role==='intake'` 的会话 id。**登记纪律(0.6.0+)**:
+写投递文件(含用户原话逐字 + 地面真相 + 设计方向候选 + 验收/部署预判),**先经 `node toolkit/pipeline-start.mjs --prompt <登记投递.md>` 在单环境实例创建本项目专属 intake 会话并投递登记,再由该新会话(project-pipeline preset)自行 `project_register`**;本项目后续 drive/watch 的 `--session` 一律从 `REGISTRY.sessions` 取该项目 `role==='intake'` 的会话 id。**登记纪律(0.6.0+)**:
 
 - title 必须**中文**(用户可读),id 必须显式**英文 slug**(如 `project-hub-i9`);纯中文 title 无 id 会被 register 拒收
 - 投递文件里写明「建议 title:'…'(中文);建议 id:'…'」,让 intake 落二元组
@@ -88,7 +88,7 @@ rulingRef:<裁决书落盘路径(feedback/ 下)>
 4. 测试:`node test/<file>.test.mjs` 直跑(沙箱内 node --test 会 EPERM,先例)→ `npm test` + `npm run check`(在 plugindev/ 下)
 5. 提交:按路径 git add,commit message 里**测试数字等实测出来再写**
 6. 部署:`node toolkit/deploy.mjs --preset project-pipeline` **必须看到 IN SYNC(版本+commit 双匹配)**——只改源码不 deploy = STALE = 旧代际假失败(selfgrowth 最大教训);host 侧 `node host-plugins/project-hub/deploy.mjs`
-7. 重启:`cmd //c restart-dsh-web-test.bat`(后台),curl 3081 验 200;多项目交付攒批一次重启
+7. 重启:`cmd //c restart-dsh-web-test.bat`(后台),curl 3080 验 200;多项目交付攒批一次重启
 8. 重启后:drive 发消息唤醒 active 项目协调者(其 intake 会话 = 各项目 REGISTRY.sessions);真实验证(探针/接口/浏览器)
 
 ## 6. 版本与同步仪式(交付收口时)
@@ -103,7 +103,7 @@ rulingRef:<裁决书落盘路径(feedback/ 下)>
 
 ## 7. 浏览器验收(视觉类 blocking,用 browser-use 技能)
 
-- 开 `http://127.0.0.1:3081` → evaluate 合成 click 点「项目中心」(aria 按钮 click 常超时)
+- 开 `http://127.0.0.1:3080` → evaluate 合成 click 点「项目中心」(aria 按钮 click 常超时)
 - React 受控输入**必须用 playwright `fill()`**(原生 setter+dispatchEvent 不触发)
 - 截图卡死("previous screenshot completing")= 关 tab 重开唯一解;文字 DOM 读数可兜底
 - 滚动:找 `scrollHeight>clientHeight+200` 的容器直接改 scrollTop
@@ -122,6 +122,14 @@ rulingRef:<裁决书落盘路径(feedback/ 下)>
 
 ## 9. 红线
 
-- prod(3080)操作须用户显式确认;`dsh-runtime/` 与市场插件本体只读;dsh-api 调用一律显式 baseUrl=3081,不落 3080 默认
+- 单环境默认实例(3080)操作须用户显式确认;`dsh-runtime/` 与市场插件本体只读;dsh-api 调用一律显式 baseUrl(单环境默认 3080,不落未确认的默认)
 - 文件删除一律 `.trash`;commit 不 push(同步仓库 subtree 推送除外)
 - 登记簿 REGISTRY 由流水线工具写,主线程不直写;看板唯一写面 = board-view.json
+
+## 维护者:双环境显式开启
+
+作者本机确有 prod/test 双实例时,在仓库根放 `.plugindev-env.json`(**必须 git-ignore,不入库**)或设 `DSH_ENV=test|prod` 显式开启。开启后:
+- dev 实例 = test(默认 `http://127.0.0.1:3081`,DSH_HOME=plugindev/.dsh-home);prod = `http://127.0.0.1:3080`(~/.dsh)。
+- **双环境显式开启下 dsh-home 以配置文件 test/prod 子对象为准,`DSH_HOME` 被忽略**。
+- 单环境默认下 `--env` 不适用(报错带引导「如需双环境,请在仓库根放 .plugindev-env.json 或设 DSH_ENV」)。
+- 最小配置 `{"env":"test"}` 即钉住 test 布局;完整配置见 `toolkit/README.md` 的 `.plugindev-env.json` schema 说明。
