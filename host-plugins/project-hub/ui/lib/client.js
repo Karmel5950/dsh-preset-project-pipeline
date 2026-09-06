@@ -311,7 +311,6 @@ window.__ModuleLoader__.load({
 			"settings.modelsUnavailable": "模型清单不可用",
 			"settings.noModels": "暂无已配置模型,请先在 dsh 设置中配置。",
 			"settings.notInList": "不在清单",
-			"settings.redline": "默认模型为 deepseek-v4-flash:0731(经 ollama-cloud);架构/产品角色读取大规格文档,建议配大上下文窗口模型;小窗模型不得配给读大文档的角色。",
 		};
 		const en = {
 			"title": "Project Hub",
@@ -524,7 +523,6 @@ window.__ModuleLoader__.load({
 			"settings.modelsUnavailable": "Model list unavailable",
 			"settings.noModels": "No configured models; configure them in dsh settings first.",
 			"settings.notInList": "not in list",
-			"settings.redline": "Default model is deepseek-v4-flash:0731 (via ollama-cloud); architect/product roles read large specs and need a large-window model; do not assign a small-window model to roles that read large docs.",
 		};
 
 		const inject = ["slots", "locale", "connection"];
@@ -2221,7 +2219,6 @@ window.__ModuleLoader__.load({
 			".dshph_settingsHint{font-size:13px;color:var(--dshph-ink3);line-height:1.6;margin:6px 0 0}",
 			".dshph_settingsOk{font-size:13px;color:var(--dshph-ok);margin:8px 0 0}",
 			".dshph_settingsErr{font-size:13px;color:var(--dshph-warn);margin:8px 0 0}",
-			".dshph_settingsRedline{font-size:13px;color:var(--dshph-warn);background:var(--dshph-warn-bg);border:1px solid var(--dshph-warn-line);border-radius:4px;padding:8px 12px;margin:0 0 12px}",
 			".dshph_roleCard{border:1px solid var(--dshph-line2);border-radius:6px;background:var(--dshph-card);padding:14px 16px;margin-bottom:12px}",
 			".dshph_roleHead{display:flex;align-items:center;gap:10px;margin-bottom:6px}",
 			".dshph_roleName{font-size:14px;font-weight:600;color:var(--dshph-ink);flex:1}",
@@ -2408,7 +2405,6 @@ window.__ModuleLoader__.load({
 			});
 			const block2 = React.createElement("section", { className: "dshph_settingsBlock", "aria-label": t("settings.nav.roles") },
 				React.createElement("h3", { className: "dshph_settingsBlockTitle" }, t("settings.nav.roles")),
-				React.createElement("p", { className: "dshph_settingsRedline" }, t("settings.redline")),
 				roleCards,
 			);
 
