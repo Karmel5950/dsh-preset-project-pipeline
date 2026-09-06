@@ -1,3 +1,6 @@
+## [0.4.0] - 2026-09-06
+
+单环境默认部署(kr-single-env 交付):deploy.mjs 默认部署到单环境 dsh-home(~/.dsh/profiles/web);--env prod --confirm-prod 仅双环境显式开启(仓库根 .plugindev-env.json 或 DSH_ENV)下适用。版本 0.3.0 → **0.4.0(minor)**。
 ## [0.3.0] - 2026-09-06
 
 看板可读性与时间线(kr-board-time-token 交付;用户五点:token 格式化+删条目数+项目/流程时间+记录页时间)。

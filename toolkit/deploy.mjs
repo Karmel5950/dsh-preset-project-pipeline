@@ -1,20 +1,22 @@
 // 部署:把 presets/<id>/ 复制到目标环境的安装根(dsh 用户 preset 目录)。
 //   node toolkit/deploy.mjs --preset <id> [--env test|prod]   安装/覆盖(不删除已有文件)
-//   node toolkit/deploy.mjs --list                            test/prod 两环境对账
+//   node toolkit/deploy.mjs --list                            单环境单行 / 双环境 test/prod 对账
 //   node toolkit/deploy.mjs --uninstall <id> [--env ...]      把安装目录移入 .trash(不物理删除)
-// 环境隔离:test = plugindev/.dsh-home(默认,env.mjs 拉起的独立实例);
-//          prod = ~/.dsh(用户日常实例,显式 --env prod 才触碰)。
+// 单环境默认:部署到单实例安装根(<dsh-home>/.agent-presets,默认 ~/.dsh/.agent-presets)。
+// 双环境显式开启(仓库根 .plugindev-env.json 或 DSH_ENV):--env test|prod 选择环境;
+//   test = plugindev/.dsh-home(env.mjs 拉起的独立实例),prod = ~/.dsh(用户日常实例)。
+// 单环境默认下 --env 不适用(报错带引导)。
 // 部署排除:package.json(dev 元数据)与 test/。部署戳写 .plugindev-deploy.json。
 import { cp, mkdir, readFile, readdir, rename, writeFile, access } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, basename } from 'node:path';
-import { PRESETS_DIR, TRASH_DIR, REPO_ROOT, runtimeDshVersion, envSpec, envFromArgs } from './paths.mjs';
+import { PRESETS_DIR, TRASH_DIR, REPO_ROOT, runtimeDshVersion, envSpec, envFromArgs, dualEnvEnabled } from './paths.mjs';
 
 const STAMP_FILE = '.plugindev-deploy.json';
 
 function parseArgs(argv) {
-  const args = { envName: 'test' };
+  const args = {};
   const envAt = argv.indexOf('--env');
   if (envAt >= 0) args.envName = argv[envAt + 1];
   for (let i = 0; i < argv.length; i += 1) {
@@ -73,20 +75,31 @@ async function statusFor(installRoot, id, sourceVersion) {
 }
 
 async function listMode() {
-  const test = envSpec('test');
-  const prod = envSpec('prod');
   const entries = (await readdir(PRESETS_DIR, { withFileTypes: true }))
     .filter((entry) => entry.isDirectory())
     .map((entry) => entry.name)
     .sort();
-  console.log(`${'PRESET'.padEnd(24)} ${'SOURCE'.padEnd(10)} ${'TEST'.padEnd(26)} ${'PROD'}`);
-  for (const id of entries) {
-    const { version } = await sourceMeta(id);
-    const testStatus = await statusFor(test.installRoot, id, version);
-    const prodStatus = await statusFor(prod.installRoot, id, version);
-    console.log(`${id.padEnd(24)} ${(version ?? '?').padEnd(10)} ${testStatus.padEnd(26)} ${prodStatus}`);
+  if (dualEnvEnabled()) {
+    const test = envSpec('test');
+    const prod = envSpec('prod');
+    console.log(`${'PRESET'.padEnd(24)} ${'SOURCE'.padEnd(10)} ${'TEST'.padEnd(26)} ${'PROD'}`);
+    for (const id of entries) {
+      const { version } = await sourceMeta(id);
+      const testStatus = await statusFor(test.installRoot, id, version);
+      const prodStatus = await statusFor(prod.installRoot, id, version);
+      console.log(`${id.padEnd(24)} ${(version ?? '?').padEnd(10)} ${testStatus.padEnd(26)} ${prodStatus}`);
+    }
+    console.log(`\ntest 安装根: ${test.installRoot}\nprod 安装根: ${prod.installRoot}`);
+  } else {
+    const single = envSpec();
+    console.log(`${'PRESET'.padEnd(24)} ${'SOURCE'.padEnd(10)} ${'STATUS'}`);
+    for (const id of entries) {
+      const { version } = await sourceMeta(id);
+      const status = await statusFor(single.installRoot, id, version);
+      console.log(`${id.padEnd(24)} ${(version ?? '?').padEnd(10)} ${status}`);
+    }
+    console.log(`\n单环境安装根: ${single.installRoot}`);
   }
-  console.log(`\ntest 安装根: ${test.installRoot}\nprod 安装根: ${prod.installRoot}`);
 }
 
 async function deploy(id, env) {
@@ -118,8 +131,10 @@ async function deploy(id, env) {
   console.log(`  戳: v${version ?? '?'} @ git ${stamp.gitCommit ?? 'n/a'} / dsh ${stamp.dshVersion}`);
   if (env.name === 'prod') {
     console.log('  ⚠ 这是生产环境:新 preset 会出现在你日常使用的模式选择器里。');
-  } else {
+  } else if (env.name === 'test') {
     console.log(`  test 实例(${env.apiBase})新建会话即生效;生产环境不受影响。`);
+  } else {
+    console.log(`  单环境实例(${env.apiBase})新建会话即生效。`);
   }
 }
 

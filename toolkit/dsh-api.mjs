@@ -2,6 +2,7 @@
 // 信封 {"type":"client-request","rpcId","method","payload"} →
 // {"type":"server-response","rpcId","result":{"ok":true,"value"}} 或 {"ok":false,"error":{code,message}}。
 // 信任围栏:Host 须为 loopback(本机 curl/fetch 天然满足)。
+// API_BASE 默认 = http://127.0.0.1:3080(单环境默认,dsh web 默认端口),经 paths.mjs 统一。
 import { API_BASE } from './paths.mjs';
 
 let rpcCounter = 0;

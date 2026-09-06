@@ -1,3 +1,14 @@
+## [0.23.0] - 2026-09-06
+
+单环境默认——去除 prod/test 双环境硬编码假设(kr-single-env 交付;背景:用户原话「其他人不一定有 prod 和 test 的环境区分这个要改,默认只有一套环境」)。注:原 APPLY 拟 0.22.0 与 kr-deploy-route-bump 撞号,顺延 0.23.0。
+
+- **默认单环境**:所有工具与文档默认一套 dsh 实例(单端口 3080、单 dsh-home ~/.dsh);端口/路径可配置(DSH_API/DSH_HOME 覆盖)。
+- **双环境降级为显式 opt-in**:仓库根放 .plugindev-env.json(必须 git-ignore)或设 DSH_ENV=test|prod;开启后 --env test|prod 与 --list 对账恢复;dsh-home 以配置文件 test/prod 子对象为准,DSH_HOME 被忽略。
+- **toolkit/paths.mjs**:envSpec() 单环境默认 spec + 双环境显式开启返回 test/prod 布局;新增 readEnvConfig()。
+- **toolkit/env.mjs**:单环境默认管理单实例;**toolkit/deploy.mjs**:--env 单环境默认报错带引导;**toolkit/dsh-api.mjs**:API_BASE 默认统一 3080(经 paths)。
+- **host-plugins/project-hub/deploy.mjs**:单环境默认部署 ~/.dsh;--env prod --confirm-prod 仅双环境显式开启下适用。
+- **文档全量对齐单环境口径**(README/UPDATE/SKILL/PROTOCOL/hub README)+ .gitignore 新增 .plugindev-env.json 忽略(阻断项)。
+- 版本 0.22.0 → **0.23.0(minor)**;测试新增 toolkit/test/single-env.test.mjs,生产全量 292+全绿。
 ## [0.22.0] - 2026-09-06
 
 deploy-restart 路由前置 + build 交付检查单(kr-deploy-route-bump 交付;背景:失败模式聚合上抛两机制项——①test-env 类失败「部署/真机验收无法由流水线验证」重复发生,且实践单 API 层变更命中 r3 需重启的 deploy-restart 依赖仍靠 gate 包部署自检兜住、未在 clarify 前置声明;②交付物频繁缺 package.json 版本 bump 与 CHANGELOG 条目(G1:kr-board-time-token 由主线程代补 0.3.0 + CHANGELOG),preset-delivery-version-bump 纪律(hits=14)未机械化。用户裁决:合并为一张机制小单)。

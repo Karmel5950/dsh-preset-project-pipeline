@@ -10,8 +10,6 @@
 - 值守驱动协议(工具无关):`PIPELINE-DRIVE-PROTOCOL.md`。
 
 > 插件开发链工具(deploy/check/validate/lint-composition/compat-scan/new-preset/refresh-lock/upgrade-runtime/stub-ctx/dialect/env/paths/dsh-api)同在本目录,清单详表待最小机制补全。
->
-> **维护者内件说明**:`paths.mjs` / `deploy.mjs` / `env.mjs` 等开发编排工具面向作者本地 monorepo 布局(仓库上一级存在 sibling `dsh-runtime`),依赖 `dsh-runtime/node_modules/@deepseek-ai/dsh`(`runtimeDshVersion()` / `DSH_BIN`),在独立 clone 下会因缺 sibling `dsh-runtime` 报 ENOENT。本仓库作为公开预设源,外部安装请走仓库根 README「从 GitHub 部署到本地」的直接安装路径,不要依赖这些 dev 内件。
 
 ## pipeline-start.mjs
 
@@ -65,16 +63,13 @@ node pipeline-drive.mjs --session abc123 --prompt ./task.txt
 echo "继续项目" | node pipeline-drive.mjs --session abc123 --stdin
 
 # 后台等待会话 abc123 出现 question/approval 帧或 REGISTRY 变化,最多 10 分钟
-node pipeline-watch.mjs --session abc123 --timeout-min 10 --log ./watch.log --ws-root <ws-root>
+node pipeline-watch.mjs --session abc123 --timeout-min 10 --log ./watch.log --ws-root E:/04-Programs/dsh/plugindev/pipeline-ws
 
 # 工具使用审计(dsh 会话存储 + zcode rollout 双源)
 node tool-usage.mjs --out ../pipeline-ws/.dsh-library/tool-usage-report.md
 ```
 
-> `<ws-root>` = 流水线工作区根,示例来自作者环境(请替换为你本机挂载工作区的真实路径)。
-
 ## 环境
 
 - Node ≥ 22(依赖全局 `fetch` 与全局 `WebSocket`;tool-usage 依赖 node:zlib 的 zstd API)。
 - 默认 API 基址 `http://127.0.0.1:3081`(test 实例);生产实例为 `http://127.0.0.1:3080`,用 `--api` 覆盖。
-- 端口环境变量覆盖:test 隔离实例端口默认 `3081`,用 `DSH_PLUGINDEV_PORT` 改(如 `set DSH_PLUGINDEV_PORT=4000` / `export DSH_PLUGINDEV_PORT=4000`);prod 基址默认 `http://127.0.0.1:3080`,用 `DSH_API` 改。
