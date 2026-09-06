@@ -8,17 +8,19 @@ description: 驱动 dsh 项目制流水线(project-pipeline preset):需求登记
 把用户需求丢给流水线异步交付,你只做:登记 → 监控 → 门禁/卡点裁决 → 应用交付物 → 验收。
 底层插件开发知识见 dsh-plugin-dev 技能;本技能只管"驱动"。
 
+> **占位符约定**:下文出现的 `<仓库根>`(dsh 仓库的 git 根)与 `<ws-root>`(流水线工作区根)均为**本机真实路径的占位符**,示例来自作者环境——请按你本机的实际路径替换(例如 ws-root 指向你 clone/挂载的工作区目录)。
+
 ## 0. 常量(本机地面真相,先核实再用)
 
-- 仓库根:`E:\04-Programs\dsh`(git 根);流水线工作区 `plugindev/pipeline-ws/`
+- 仓库根:`<仓库根>`(dsh 仓库的 git 根,示例来自作者环境;请替换为你本机的仓库根);流水线工作区示例 `plugindev/pipeline-ws/`
 - test 实例:`http://127.0.0.1:3081`(prod 3080 **禁止不受控直写**)
 - **intake 会话 = 每项目一个**(P0 一次性化,不再有全局固定会话作为工作面):
   - 从 `pipeline-ws/<projectId>/.dsh-project/REGISTRY.json` 的 `sessions` 取 `role==='intake'` 的 `sessionId`(register 时即 auto-record 入册)
   - 新建项目 intake 会话:`node toolkit/pipeline-start.mjs --prompt <登记投递.md> --base-url http://127.0.0.1:3081`(输出 sessionId;权威来源仍是 REGISTRY.sessions)
   - 验证活性:drive 返回 HTTP 200 `accepted:true` 即在
-- 工具(都在 `plugindev/` 下执行):
+- 工具(都在 `plugindev/` 下执行,目录为作者环境示例;toolkit 依赖 sibling `dsh-runtime`,见仓库根 README「开发与维护者」):
   - 投递:`node toolkit/pipeline-drive.mjs --session <id> --prompt <file.md>`(id 取本项目 REGISTRY.sessions 的 intake)
-  - 监控:`node toolkit/pipeline-watch.mjs --session <id> --timeout-min 360 --ws-root E:/04-Programs/dsh/plugindev/pipeline-ws`(与会话 id 解耦,按 --ws-root 轮询 REGISTRY;--session 亦可传本项目 intake id)
+  - 监控:`node toolkit/pipeline-watch.mjs --session <id> --timeout-min 360 --ws-root <ws-root>`(示例来自作者环境;与会话 id 解耦,按 --ws-root 轮询 REGISTRY;--session 亦可传本项目 intake id)
   - 建会投递:`node toolkit/pipeline-start.mjs --prompt <登记投递.md> --base-url http://127.0.0.1:3081`
 - 登记簿:`pipeline-ws/<projectId>/.dsh-project/REGISTRY.json`,判读字段:`state`(active/parked/delivered/rejected)、`stageIndex`、`gateStatus`(pending=待你裁决);**blockers 无 state 字段,open = 无 `resolvedAt`**;`sessions` 是以 `sessionId` 为键的对象(值含 `role`:`'intake'`/`'coordinator'`;主线程按 role 取键名即得会话 id)
 - 流程阶段(以各项目 FLOW.json / journal 编号为准):standard-flow(11 阶段)0 clarify → 1 spec-gate → 2 design → 3 mid-summary → **4 design-gate** → 5 build → 6 test → 7 accept → **8 delivery-gate** → 9 wrap → 10 harvest;adhoc(10 阶段,无 mid-summary)**delivery-gate=7**;lite(6 阶段,缺陷修复用)0 clarify → 1 build → 2 test → **3 delivery-gate** → 4 wrap → 5 harvest
@@ -85,7 +87,7 @@ rulingRef:<裁决书落盘路径(feedback/ 下)>
    - persona 长度:若交付 `roles/*.json` manifest 形态保持 ≤700;agent.cordis.yml 内联 persona text 不触发 ≤700 校验但仍保持精炼
 4. 测试:`node test/<file>.test.mjs` 直跑(沙箱内 node --test 会 EPERM,先例)→ `npm test` + `npm run check`(在 plugindev/ 下)
 5. 提交:按路径 git add,commit message 里**测试数字等实测出来再写**
-6. 部署:`npm run deploy -- --preset project-pipeline` **必须看到 IN SYNC(版本+commit 双匹配)**——只改源码不 deploy = STALE = 旧代际假失败(selfgrowth 最大教训);host 侧 `node host-plugins/project-hub/deploy.mjs`
+6. 部署:`node toolkit/deploy.mjs --preset project-pipeline` **必须看到 IN SYNC(版本+commit 双匹配)**——只改源码不 deploy = STALE = 旧代际假失败(selfgrowth 最大教训);host 侧 `node host-plugins/project-hub/deploy.mjs`
 7. 重启:`cmd //c restart-dsh-web-test.bat`(后台),curl 3081 验 200;多项目交付攒批一次重启
 8. 重启后:drive 发消息唤醒 active 项目协调者(其 intake 会话 = 各项目 REGISTRY.sessions);真实验证(探针/接口/浏览器)
 

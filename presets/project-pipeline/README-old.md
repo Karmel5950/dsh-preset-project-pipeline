@@ -19,8 +19,10 @@
 
 ## 本地开发循环
 
+> **legacy 说明**:本仓库(monorepo)根目录**没有 `package.json`**,`npm run <任何脚本>` 在仓库根不存在。下方命令来自**作者本地 plugindev monorepo 开发环境**(仅历史存档),且依赖 sibling `dsh-runtime`——**外部用户不应照此执行**;外部安装请走仓库根 README「从 GitHub 部署到本地」的直接安装路径。
+
 ```bash
-cd E:\04-Programs\dsh\plugindev
+cd <仓库根>   # 示例来自作者环境:legacy 本地开发循环,请替换为你本机 monorepo 的 plugindev 目录
 npm run check                                  # 组合文件 lint(loader 方言,!!js 标记化)
 npm test                                       # 单测(stub ctx,零依赖)
 npm run deploy -- --preset project-pipeline    # 装进 test 环境(plugindev/.dsh-home)

@@ -244,7 +244,7 @@ node deploy.mjs --uninstall     # 从 test 卸载
 node deploy.mjs --uninstall --env prod --confirm-prod   # 从 prod 卸载
 ```
 
-- 插件文件与 `ui/` 目录移入 `E:\04-Programs\dsh\.trash\`(绝不物理删除)。
+- 插件文件与 `ui/` 目录移入 `.trash` 运行期回收目录(相对你 dsh 主目录的占位表述,示例来自作者环境——不写本机绝对路径;绝不物理删除)。
 - `dsh-compat.mjs` 是共享兼容层副本,可能仍被其他宿主插件引用,**不随本插件卸载**。
 - `cordis.patch.yml` 补丁行移除。
 
