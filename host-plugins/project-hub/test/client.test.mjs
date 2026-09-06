@@ -421,3 +421,39 @@ test('client.js(R5):记录页门禁/日志补时间', () => {
   assert.ok(CLIENT_SRC.includes('j.file'), 'journals 元素应为对象(取 j.file)');
   assert.ok(CLIENT_SRC.includes('j.start'), 'journals 元素应取 j.start');
 });
+
+// ── 0.4.1:isRoleDraftDirty(角色卡未保存徽章,纯函数)──────────────────────
+
+const isRoleDraftDirty = extractFunction(CLIENT_SRC, 'isRoleDraftDirty');
+
+test('isRoleDraftDirty:saved 缺失(null)→ 草稿有值才算脏', () => {
+  assert.equal(isRoleDraftDirty(null, { provider: '', model: '' }), false, '默认态草稿(空串)不算脏');
+  assert.equal(isRoleDraftDirty(null, { provider: 'a', model: 'b' }), true, '默认态草稿被改成具体模型 → 脏');
+});
+
+test('isRoleDraftDirty:与 saved 一致 → false;不一致 → true', () => {
+  const saved = { role: 'dev', provider: 'a', model: 'b', source: 'workspace' };
+  assert.equal(isRoleDraftDirty(saved, { provider: 'a', model: 'b' }), false);
+  assert.equal(isRoleDraftDirty(saved, { provider: 'a', model: 'c' }), true, 'model 变了 → 脏');
+  assert.equal(isRoleDraftDirty(saved, { provider: 'x', model: 'b' }), true, 'provider 变了 → 脏');
+});
+
+test('isRoleDraftDirty:saved 为 null 值(默认继承)与空串草稿等价', () => {
+  assert.equal(isRoleDraftDirty({ role: 'dev', provider: null, model: null }, { provider: '', model: '' }), false);
+});
+
+// ── 0.4.1:警示 UI 静态核对(零项目 scanRoot 警示 / 保存落点提示 / 未保存徽章)──
+
+test('client.js(0.4.1):新增 i18n 键与警示渲染静态核对', () => {
+  assert.ok(CLIENT_SRC.includes('"settings.saveLocationHint"'), '应有保存落点提示键');
+  assert.ok(CLIENT_SRC.includes('"settings.unsaved"'), '应有未保存徽章键');
+  assert.ok(CLIENT_SRC.includes('"empty.scanRootLabel"'), '应有零项目 scanRoot 标签键');
+  assert.ok(CLIENT_SRC.includes('"empty.scanRootHint"'), '应有零项目 scanRoot 指引键');
+  assert.ok(CLIENT_SRC.includes('dshph_roleUnsaved'), '应有未保存徽章样式类');
+  assert.ok(CLIENT_SRC.includes('dshph_scanRootWarn'), '应有 scanRoot 警示样式类');
+  assert.ok(CLIENT_SRC.includes('EmptyState, { t, scanRoot }'), '看板空态应传入 scanRoot');
+});
+
+test('client.js(0.4.1):保存/恢复默认成功后同步 roles 快照(防徽章误亮)', () => {
+  assert.ok(CLIENT_SRC.includes('同步 settings.roles 快照'), 'saveRole/reset 成功路径应同步快照');
+});

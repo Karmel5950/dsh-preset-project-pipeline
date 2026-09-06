@@ -1826,3 +1826,67 @@ test('通道 PUT settings.roleModel reset:true:role 非已知角色 → 400(AC-A
   assert.equal(lastStatus(res), 400);
   assert.match(lastJson(res).error, /unknown role: ghost/);
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 0.4.1 修复(本机复刻「设置卡保存角色模型必 400」):resolver 第三级回退
+// homedir()/.dsh(单环境默认 dsh-home)+ 通道级回归(无显式 config 时经 env 解析 preset)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('resolvePresetRolesDir:无 config 无 env DSH_HOME → 回退 homedir()/.dsh/.agent-presets/project-pipeline/roles(0.4.1)', () => {
+  const prev = process.env.DSH_HOME;
+  delete process.env.DSH_HOME;
+  try {
+    const got = resolvePresetRolesDir(makeSettingsService());
+    assert.equal(typeof got, 'string', '单环境默认部署不得再返回 null(否则保存必 400)');
+    const norm = got.replaceAll('\\', '/');
+    assert.ok(norm.endsWith('.agent-presets/project-pipeline/roles'), `应落在标准安装位置,实际 ${norm}`);
+    assert.ok(norm.includes('.dsh'), `应指向 dsh-home,实际 ${norm}`);
+  } finally {
+    if (prev === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prev;
+  }
+});
+
+test('resolveProjcachePath:无 config 无 env DSH_HOME → 回退 homedir()/.dsh/storages/session_projcache.json(0.4.1 同型回退)', () => {
+  const prev = process.env.DSH_HOME;
+  delete process.env.DSH_HOME;
+  try {
+    const got = resolveProjcachePath(makeSettingsService());
+    assert.equal(typeof got, 'string', '单环境默认部署不得再返回 null');
+    const norm = got.replaceAll('\\', '/');
+    assert.ok(norm.endsWith('.dsh/storages/session_projcache.json'), `应落在 dsh-home storages,实际 ${norm}`);
+  } finally {
+    if (prev === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prev;
+  }
+});
+
+test('通道 PUT settings.roleModel:无显式 config,经 env DSH_HOME 回退解析 preset → 200(复现回归:旧代码此处 400 role manifest not found)', async () => {
+  const prev = process.env.DSH_HOME;
+  process.env.DSH_HOME = 'home';
+  try {
+    // settingsService 无 project-hub 节(get 返回 undefined)→ config 级解析落空,
+    // 走 env DSH_HOME 回退;stub fs 里 home/.agent-presets/project-pipeline/roles/dev.json 存在。
+    const tree = {
+      ws: {},
+      home: {
+        '.agent-presets': {
+          'project-pipeline': {
+            roles: { 'dev.json': JSON.stringify({ id: 'dev', summary: '写实现代码' }) },
+          },
+        },
+      },
+    };
+    const handler = makeApiHandler({ settingsService: makeSettingsService(), deps: makeStubDeps(tree), logger: { warn() {} } });
+    const res = stubRes();
+    await handler(putReq({ settings: { roleModel: { role: 'dev', provider: 'x', model: 'y' } } }), res);
+    assert.equal(lastStatus(res), 200, 'preset manifest 经回退解析后应保存成功');
+    const body = lastJson(res);
+    assert.equal(body.ok, true);
+    assert.equal(body.settings.roleModel.model.model, 'y');
+    // 覆盖写进 workspace 角色文件并带用户批准标记。
+    const written = JSON.parse(tree.ws['.dsh-library'].roles['dev.json']);
+    assert.deepEqual(written.model, { provider: 'x', model: 'y' });
+    assert.equal(written.modelApproval.by, 'user');
+  } finally {
+    if (prev === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prev;
+  }
+});
