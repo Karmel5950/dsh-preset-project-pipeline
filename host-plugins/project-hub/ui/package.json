@@ -1,0 +1,23 @@
+{
+  "name": "dsh-project-hub-ui",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "description": "Web client bundle: the Project Hub board for project-pipeline. Sidebar footer action entry opens a full-screen overlay listing all projects (state/iteration/current stage/pending gate/budget), with per-project detail drill-down, plus a scan-root config card in Settings - Plugins - Plugin configuration. Settings tab (kr-control-plane-i2): two-module redo (sedimentation policy + per-role model) with partition nav, model dropdown from dsh configured models (view=models), and C-D read-modify-write guard.",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    }
+  }
+}
