@@ -19,7 +19,13 @@ export const DSH_HOME = process.env.DSH_HOME
   : join(homedir(), '.dsh');
 export const INSTALL_ROOT = join(DSH_HOME, '.agent-presets');
 
-export const API_BASE = process.env.DSH_API ?? 'http://127.0.0.1:3080';
+function computeApiBase() {
+  if (process.env.DSH_API) return process.env.DSH_API;
+  // 双环境显式开启:当前环境为 test → 3081(plugindev/.dsh-home);prod 或单环境默认 → 3080。
+  const name = dualEnvName() ?? 'default';
+  if (name === 'test') return 'http://127.0.0.1:' + Number(process.env.DSH_TEST_PORT ?? readEnvConfig()?.test?.port ?? 3081);
+  return 'http://127.0.0.1:3080';
+}
 
 // ── 环境配置(单环境默认)────────────────────────────────────────────────────
 // 单环境默认:一套 dsh 实例(默认端口 3080,dsh-home ~/.dsh),所有工具默认落在这套。
@@ -33,7 +39,11 @@ export const DSH_BIN = join(RUNTIME_NODE_MODULES, '@deepseek-ai', 'dsh', 'lib', 
 export const TEST_DSH_HOME = join(WORKSPACE_ROOT, '.dsh-home');
 export const TEST_PORT = Number(process.env.DSH_PLUGINDEV_PORT ?? 3081);
 
+
 const ENV_CONFIG_FILE = '.plugindev-env.json';
+
+// API_BASE 按当前环境解析(单环境默认 3080;双环境显式开启且 env=test → 3081)。
+export const API_BASE = computeApiBase();
 
 /** 读仓库根 .plugindev-env.json(缺省/坏 JSON 返回 null)。configPath 可注入便于单测。 */
 export function readEnvConfig(configPath = join(WORKSPACE_ROOT, ENV_CONFIG_FILE)) {
@@ -76,7 +86,7 @@ function dualEnvSpec(name) {
     };
   }
   if (name === 'prod') {
-    const port = Number(prod.port ?? (new URL(API_BASE).port || 80));
+    const port = Number(prod.port ?? 3080);
     const dshHome = resolve(prod.dshHome ?? join(homedir(), '.dsh'));
     return {
       name: 'prod',
