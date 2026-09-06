@@ -1,4 +1,4 @@
-// C4c 验收自测:六角色 role_show 全部编译通过,coordinator 实测字符数写 journal。
+// C4c 验收自测:七角色 role_show 全部编译通过,coordinator 实测字符数写 journal。
 // 运行:cd deliverables/presets/project-pipeline && node test/verify-c4c.mjs
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -19,7 +19,7 @@ try {
   await apply(ctx);
   const roleShow = ctx.tools.items.find((t) => t.name === 'role_show');
   const exec = { agent: { session: { header: { cwd: workspace } } } };
-  const roles = ['coordinator', 'product', 'architect', 'dev', 'tester', 'deliverer'];
+  const roles = ['coordinator', 'product', 'architect', 'dev', 'tester', 'deliverer', 'pm'];
   const results = [];
   let allPass = true;
   for (const role of roles) {

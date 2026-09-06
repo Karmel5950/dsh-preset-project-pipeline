@@ -237,7 +237,7 @@ test('每个工具都有纯 JSON Schema 参数与 output.schema/render', async (
   }
 });
 
-test('preset 自带库可读:6 角色 + standard-flow(11 阶段)+ iteration-flow(7 阶段)', async () =>
+test('preset 自带库可读:7 角色 + standard-flow(12 阶段)+ iteration-flow(7 阶段)', async () =>
   withWorkspace(async (workspace) => {
     const { byName } = await mountTools(lib);
     const exec = execFor(workspace);
@@ -245,7 +245,7 @@ test('preset 自带库可读:6 角色 + standard-flow(11 阶段)+ iteration-flow
     const roles = await byName.role_list.execute({}, exec);
     assert.deepEqual(
       roles.roles.map((role) => role.id),
-      ['architect', 'coordinator', 'deliverer', 'dev', 'product', 'tester'],
+      ['architect', 'coordinator', 'deliverer', 'dev', 'pm', 'product', 'tester'],
     );
     assert.ok(roles.roles.every((role) => role.source === 'preset'));
     assert.deepEqual(roles.errors, []);
@@ -254,9 +254,14 @@ test('preset 自带库可读:6 角色 + standard-flow(11 阶段)+ iteration-flow
       const shown = await byName.role_show.execute({ role: role.id }, exec);
       assert.equal(shown.id, role.id);
       assert.ok(shown.persona.trim().length > 0, `${role.id} persona 非空`);
-      assert.ok(shown.persona.length <= 700, `${role.id} persona 不超过 700 字(0.3.1 触点比对语义再放开)`);
+      assert.ok(shown.persona.length <= 800, `${role.id} persona 不超过 800 字(0.3.1 触点比对语义再放开;kr-pm-review 协调者 persona 增 pm-review 回路句后放宽)`);
       assert.ok(shown.subagent.toolFilter.allow.includes('project_budget'), `${role.id} allow 含 project_budget`);
-      assert.equal(shown.subagent.agentOptions, undefined, '清单未声明 model 时不应有 agentOptions');
+      if (role.id === 'pm') {
+        // pm 声明 model(模型红线)→ agentOptions 透传 provider/model。
+        assert.deepEqual(shown.subagent.agentOptions, { provider: 'ollama-cloud', model: 'deepseek-v4-flash:0731' }, 'pm 声明 model → agentOptions 透传');
+      } else {
+        assert.equal(shown.subagent.agentOptions, undefined, '清单未声明 model 时不应有 agentOptions');
+      }
       assert.match(shown.workspaceNote, /\.dsh-project\//);
       // P1:六角色均带 readings;未给 projectId 时返回原始模板(含 {{base}}/{{project}}
       // 或 P4 的相对 .dsh-library/ 路径 readings,如 lessons-index.json)。
@@ -276,7 +281,7 @@ test('preset 自带库可读:6 角色 + standard-flow(11 阶段)+ iteration-flow
     const std = flows.flows.find((f) => f.id === 'standard-flow');
     assert.equal(std.version, 1);
     assert.equal(std.source, 'preset');
-    assert.equal(std.stageCount, 11);
+    assert.equal(std.stageCount, 12);
     const iter = flows.flows.find((f) => f.id === 'iteration-flow');
     assert.equal(iter.version, 1);
     assert.equal(iter.source, 'preset');
@@ -288,8 +293,13 @@ test('preset 自带库可读:6 角色 + standard-flow(11 阶段)+ iteration-flow
     const flow = await byName.flow_show.execute({ flow: 'standard-flow' }, exec);
     assert.deepEqual(
       flow.stages.map((stage) => stage.id),
-      ['clarify', 'spec-gate', 'design', 'mid-summary', 'design-gate', 'build', 'test', 'accept', 'delivery-gate', 'wrap', 'harvest'],
+      ['clarify', 'spec-gate', 'design', 'pm-review', 'mid-summary', 'design-gate', 'build', 'test', 'accept', 'delivery-gate', 'wrap', 'harvest'],
     );
+    const pmReview = flow.stages.find((stage) => stage.id === 'pm-review');
+    assert.equal(pmReview.role, 'pm', 'pm-review 阶段 role=pm');
+    assert.match(pmReview.note, /轮次上限 3/, 'pm-review note 含轮次上限');
+    const designGate = flow.stages.find((stage) => stage.id === 'design-gate');
+    assert.match(designGate.note, /附 PM 意见单/, 'design-gate note 含「附 PM 意见单」');
     const accept = flow.stages.find((stage) => stage.id === 'accept');
     assert.equal(accept.role, 'product');
     assert.match(accept.note, /代用户首轮验收/);
@@ -491,7 +501,7 @@ test('output.render 冒烟:四工具渲染含关键字段', async () =>
     const rolesValue = await byName.role_list.execute({}, exec);
     const rolesText = byName.role_list.output.render({}, rolesValue).map((b) => b.text).join('\n');
     assert.match(rolesText, /coordinator\[preset\]/);
-    assert.match(rolesText, /可用角色 6 个/);
+    assert.match(rolesText, /可用角色 7 个/);
 
     const showValue = await byName.role_show.execute({ role: 'coordinator', projectId: 'p1' }, exec);
     const showText = byName.role_show.output.render({ role: 'coordinator' }, showValue).map((b) => b.text).join('\n');
@@ -499,12 +509,12 @@ test('output.render 冒烟:四工具渲染含关键字段', async () =>
     assert.match(showText, /项目协调者/);
 
     const flowsValue = await byName.flow_list.execute({}, exec);
-    assert.match(byName.flow_list.output.render({}, flowsValue).map((b) => b.text).join('\n'), /standard-flow@1\[preset\] 11 个阶段/);
+    assert.match(byName.flow_list.output.render({}, flowsValue).map((b) => b.text).join('\n'), /standard-flow@1\[preset\] 12 个阶段/);
 
     const flowValue = await byName.flow_show.execute({ flow: 'standard-flow' }, exec);
     const flowText = byName.flow_show.output.render({}, flowValue).map((b) => b.text).join('\n');
     assert.match(flowText, /02\. \[gate\] spec-gate/);
-    assert.match(flowText, /09\. \[gate\] delivery-gate \| 门禁:交付验收/);
+    assert.match(flowText, /10\. \[gate\] delivery-gate \| 门禁:交付验收/);
   }));
 
 test(`lib 装载来源标注(当前:${usingRealLib ? '真 project-lib.mjs' : '内置 stub,集成期切换真 lib'})`, () => {
@@ -532,7 +542,7 @@ const REAL_TOOL_SURFACE = new Set([
   // ask
   'ask_user_question',
   // delegation
-  'subagent_architect', 'subagent_deliverer', 'subagent_dev', 'subagent_product', 'subagent_tester', 'subagent_coordinator', 'subagent_devhelper',
+  'subagent_architect', 'subagent_deliverer', 'subagent_dev', 'subagent_product', 'subagent_pm', 'subagent_tester', 'subagent_coordinator', 'subagent_devhelper',
   'send_message', 'interrupt_agent', 'subagent_control', 'subagent_list_agents',
   // project-registry
   'project_register', 'project_advance', 'project_gate', 'project_budget', 'project_status', 'project_block', 'project_harvest', 'project_audit',
@@ -600,6 +610,7 @@ test('R4-AC3 per-role 行 toolFilter 一致性:名字 ∈ 真实工具面;coordi
   const rows = extractPerRoleAllow(text);
   assert.ok(rows.has('subagent_coordinator'), '应存在 subagent_coordinator 行');
   assert.ok(rows.has('subagent_dev'), '应存在 subagent_dev 行');
+  assert.ok(rows.has('subagent_pm'), '应存在 subagent_pm 行(kr-pm-review)');
   for (const [toolName, names] of rows) {
     for (const name of names) {
       assert.ok(REAL_TOOL_SURFACE.has(name), `${toolName} 行引用未知工具 "${name}"`);

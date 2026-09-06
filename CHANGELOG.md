@@ -1,3 +1,20 @@
+## [0.21.0] - 2026-09-06
+
+流水线产品经理角色——设计的用户视角评审前置(kr-pm-review 交付;背景:用户此前否决过一版设置 UI(kr-control-plane v0.19.0「可用性,易用性几乎为 0,打回去重做」),并在 kr-control-plane-i2 的 design-gate 再次确认:不想反复亲审设计,希望流水线内部先把可用性关守住,用户只在终点做一次性确认。本单把这件事机制化:新增正式「产品经理(pm)」角色,设计类产出在到达用户/design-gate 之前,必须先经 PM 从用户视角评审并迭代到通过)。
+
+- **新增 pm 角色(roles/pm.json)**:persona 核心纪律=纯用户视角(可用性/易用性/场景匹配/可读性),明确不关心实现与技术可行性(那是 architect 领地,PM 越界即失效);产出与评审口径全部用非技术用户语言。**必查清单 8 条内嵌 persona(硬性,spec-gate 裁决 C2)**:模型/选项下拉自真实配置清单而非自由文本、选项展示真实型号串、恢复默认/回退路径、角色/模块职责说明、术语行话残留、下拉数据源来自本机真实配置(存在性判定以本机 settings.yaml 为权威源,公开目录快照未收录 ≠ 不存在;臆造数值仍须抓——更正书改写)、状态展示信息误当配置、规则表等内部机制误暴露给用户。**边界措辞(spec-gate 裁决 C3)**:意见单为 design-gate 前置质量闸,不构成门禁终审;门禁终审由用户执行;verdict 词表仅 pass/revise;文本不含 approve/批准/代用户/代答/代行/门禁裁决 等违禁词。**模型红线(D5)**:pm.json 显式声明 model=deepseek-v4-flash:0731(provider=ollama-cloud,取自 settings.yaml subagent-defaults,不臆造),persona 不写大窗提示。tools.allow=read/glob/grep/write/todo_write/project_budget/project_block(不含 web_search 与 subagent/spawn 权);workspace=project-root。
+- **流程接线(standard-flow.json)**:design 与 mid-summary 之间插入独立 `pm-review` work 阶段(role=pm,produces=PM 意见单),note 含评审要求/轮次上限 3/升级路径/PM pass 是前置质量闸不构成门禁终审;design 阶段 note 增补「产出后须经 pm-review 阶段评审,PM pass 才可呈递 design-gate」;design-gate 阶段 note 增补「呈递包必须附 PM 意见单」。流程数据驱动,不加新 stage 字段(沿用 kr-accept-route 选型)。
+- **lite-flow 接入(D3)**:workspace 覆盖版 lite-flow.json 的 build 阶段 note 增补——涉及 UI/用户可见产出的 lite 单接轻量评审(协调者 spawn subagent_pm 试评一轮,verdict=pass 才可提交 build 产物);纯内部/无用户可见产出的 lite 单不接。
+- **轮次计数纯函数(project-lib.mjs)**:新增 `pmRoundDecision({ round, verdict, maxRounds=3 })` 纯函数(verdict=pass → pass;revise 未达上限 → revise+nextRound;revise 达上限 → escalate),作为轮次规则的可测参考实现(协调者按 note 文本 + 流程数据 .dsh-project/pm-review.json 维护轮次,不直接调用)。
+- **agent.cordis.yml**:新增 tool-subagent-pm 工具行(toolFilter=pm allow 面);coordinator 行 allow 增 subagent_pm。
+- **roles/coordinator.json**:tools.allow 增 subagent_pm;persona 增 pm-review 回路一句(PM verdict=revise 时回 architect 返工重评,轮次上限 3,超限升级呈用户;轮次计数写 .dsh-project/pm-review.json)。
+- **静态探针(scripts/pm-probe.mjs)**:断言 pm 角色入册静态要素(roles/pm.json 存在且含必查清单段、agent.cordis.yml 含 subagent_pm 行、coordinator allow 含 subagent_pm、standard-flow 含 pm-review 阶段且 design-gate note 含「附 PM 意见单」、pm model=deepseek-v4-flash:0731)。
+- 版本 0.20.0 → **0.21.0(minor)**:新角色 + 流程接线 = 能力新增。
+- 测试:新增 test/pm.test.mjs(AC1 必查清单段与 8 条、C3 违禁词断言(pm persona + 意见单模板)、校准样例(自由文本框选模型/术语行话残留/臆造数值/状态展示误当配置 → 判 revise)、pmRoundDecision 三分支 happy path + 边界);project-lib 增 pmRoundDecision 纯函数单测;project-roles 存量断言同步(角色清单 6→7、standard-flow 阶段数 11→12、REAL_TOOL_SURFACE 增 subagent_pm、R4-AC3 增 subagent_pm 行、render 断言 6→7 角色/11→12 阶段);project-registry 增 design-gate present 含 PM 意见单路径断言(AC4);toolface-audit 增 pm 纳入审计网(L1↔L2 一致);toolface-model 增 pm model→agentOptions 透传一致;verify-c4c 角色清单增 pm。覆盖仓库全部相关测试文件(selftest-must-cover-repo-test-files),新增逻辑分支均有 happy path 测试(test-coverage-happy-path)。
+- **AC5 真机(r4)**:下个含设计阶段的自然项目(kr-board-time-token,spec-gate 裁决 C1 钉死)走完整 PM 回路(design 产出 → PM 评审 → pass → design-gate 用户终审),由用户侧 blocking 执行;流水线只做单测/桩预演核对。
+- **AC6 部署(r3)**:preset 部署 IN SYNC + 重启后 pm 角色可用(行为探针:role_show(role=pm) 可展开 + subagent_pm 可 spawn),由用户侧 blocking 执行。
+- 触点:presets/project-pipeline/(roles/pm.json、agent.cordis.yml、roles/coordinator.json、flows/standard-flow.json、plugins/project-lib.mjs、scripts/pm-probe.mjs、test/、package.json、CHANGELOG)+ pipeline-ws/.dsh-library/flows/lite-flow.json → **r2 交付 deliverables/ + APPLY.md** + **r3 deploy 至 IN SYNC + 重启**(重启窗口并入攒批)。
+
 ## [0.20.0] - 2026-09-05
 
 门禁授权源校验(kr-gate-auth 交付;背景:kr-self-audit spec-gate 期间,协调者引用主线程在卡点裁决里的措辞自行 approve 了门禁——越权边缘。门禁 approve 是用户否决点的核心,授权来源必须显式、可追溯)。

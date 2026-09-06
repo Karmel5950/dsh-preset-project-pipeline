@@ -913,6 +913,25 @@ test('project_gate:卡点 resolve / revise / present 不受 rulingRef 影响(AC1
   assert.equal(resolved.blocker.status, 'resolved');
 });
 
+test('project_gate:design-gate present 时 materials 可携带 PM 意见单路径(AC4,协调者行为桩)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'mini-flow', [
+    { id: 'design', type: 'work', role: 'architect' },
+    { id: 'design-gate', type: 'gate', title: '设计与UX评审' },
+  ]);
+  const ctx = await mountPlugin();
+  const context = sessionContext(workspace);
+  const reg = await getTool(ctx, 'project_register').execute({ title: 'PM Gate', id: 'pm-gate', requirement: 'r', flowTemplate: 'mini-flow' }, context);
+  await getTool(ctx, 'project_advance').execute({ projectId: reg.projectId }, context); // → design-gate
+  const present = await getTool(ctx, 'project_gate').execute({
+    projectId: reg.projectId, stageId: 'design-gate', action: 'present',
+    package: { summary: '设计评审', materials: ['.dsh-project/pm-review/round-1.md'] },
+  }, context);
+  assert.equal(present.gateStatus, 'pending');
+  const gateFile = await readFile(present.gatePath, 'utf8');
+  assert.ok(gateFile.includes('.dsh-project/pm-review/round-1.md'), '呈递包 materials 含 PM 意见单路径(AC4)');
+});
+
 test('project_advance:最后阶段无 appendStages = 结项(delivered);appendStages 开新迭代;终态拒绝', async (t) => {
   const { workspace, ctx, projectId } = await registerMini(t);
   const context = sessionContext(workspace);

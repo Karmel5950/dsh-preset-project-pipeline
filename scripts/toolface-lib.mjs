@@ -33,7 +33,7 @@ export const REAL_TOOL_SURFACE = new Set([
   // ask
   'ask_user_question',
   // delegation
-  'subagent_architect', 'subagent_deliverer', 'subagent_dev', 'subagent_product', 'subagent_tester', 'subagent_coordinator', 'subagent_devhelper',
+  'subagent_architect', 'subagent_deliverer', 'subagent_dev', 'subagent_product', 'subagent_tester', 'subagent_coordinator', 'subagent_devhelper', 'subagent_pm',
   'send_message', 'interrupt_agent', 'subagent_control', 'subagent_list_agents',
   // project-registry
   'project_register', 'project_advance', 'project_gate', 'project_budget', 'project_status', 'project_block', 'project_harvest', 'project_audit',

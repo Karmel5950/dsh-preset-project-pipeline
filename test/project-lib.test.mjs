@@ -75,6 +75,7 @@ import {
   canonicalStringify,
   sha256Hex,
   returnHashOf,
+  pmRoundDecision,
 } from '../plugins/project-lib.mjs';
 
 // ── 桩具 ────────────────────────────────────────────────────────────────────
@@ -1081,6 +1082,30 @@ test('returnHashOf:同返回体重放哈希一致(AC2)', () => {
   assert.equal(returnHashOf(shuffled), h1, '同返回体重放(键序不同)哈希一致');
   // 内容变化 → 哈希变化。
   assert.notEqual(returnHashOf({ ...body, status: 'rejected' }), h1, '内容变化哈希变化');
+});
+
+// ── PM 评审轮次决策(kr-pm-review,0.21.0):pmRoundDecision 纯函数 ──
+
+test('pmRoundDecision:verdict=pass → action=pass(不推进轮次)', () => {
+  assert.deepEqual(pmRoundDecision({ round: 1, verdict: 'pass' }), { action: 'pass' });
+  assert.deepEqual(pmRoundDecision({ round: 3, verdict: 'pass' }), { action: 'pass' });
+});
+
+test('pmRoundDecision:verdict=revise 未达上限 → action=revise + nextRound(round+1)', () => {
+  assert.deepEqual(pmRoundDecision({ round: 1, verdict: 'revise' }), { action: 'revise', nextRound: 2 });
+  assert.deepEqual(pmRoundDecision({ round: 2, verdict: 'revise' }), { action: 'revise', nextRound: 3 });
+});
+
+test('pmRoundDecision:verdict=revise 达上限(round>=maxRounds)→ action=escalate(超限升级)', () => {
+  assert.deepEqual(pmRoundDecision({ round: 3, verdict: 'revise' }), { action: 'escalate' });
+  assert.deepEqual(pmRoundDecision({ round: 4, verdict: 'revise' }), { action: 'escalate' });
+});
+
+test('pmRoundDecision:maxRounds 自定义与非法回退(边界)', () => {
+  assert.deepEqual(pmRoundDecision({ round: 2, verdict: 'revise', maxRounds: 2 }), { action: 'escalate' });
+  assert.deepEqual(pmRoundDecision({ round: 1, verdict: 'revise', maxRounds: 2 }), { action: 'revise', nextRound: 2 });
+  assert.deepEqual(pmRoundDecision({ round: 1, verdict: 'revise', maxRounds: 0 }), { action: 'revise', nextRound: 2 }, 'maxRounds 非法回退默认 3');
+  assert.deepEqual(pmRoundDecision({ round: 1, verdict: 'revise', maxRounds: 'x' }), { action: 'revise', nextRound: 2 }, 'maxRounds 非整数回退默认 3');
 });
 
 

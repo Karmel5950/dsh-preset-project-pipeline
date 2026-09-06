@@ -56,6 +56,16 @@ test('checkModelPassthrough:坏条目跳过,不炸', () => {
   assert.deepEqual(checkModelPassthrough(roles), []);
 });
 
+test('checkModelPassthrough:pm model→agentOptions 透传一致(AC1,kr-pm-review)', () => {
+  const roles = [
+    { id: 'pm', manifest: { id: 'pm', model: { provider: 'ollama-cloud', model: 'deepseek-v4-flash:0731' } } },
+  ];
+  assert.deepEqual(checkModelPassthrough(roles), [], 'pm 声明 model 且透传一致');
+  const ao = compileModelAgentOptions(roles[0].manifest);
+  assert.equal(ao.provider, 'ollama-cloud');
+  assert.equal(ao.model, 'deepseek-v4-flash:0731');
+});
+
 // ── 防伪造硬约束 AC(checkModelApproval):非默认模型声明须携带用户批准标记 ──
 
 test('checkModelApproval:声明 model 且携带用户批准标记 → 无漂移(防伪造 AC happy path)', () => {

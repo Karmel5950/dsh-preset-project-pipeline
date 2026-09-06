@@ -17,6 +17,8 @@
 # 0.9.0(2026-09-01,kr-p0-intake / REFACTOR-PLAN P0):intake 会话一次性化——persona 新增
 #   会话绑定/任务路由(纯问答=一屏内无需工具)/登记触点三条纪律;配套 toolkit pipeline-start.mjs
 #   与 dsh-pipeline 技能会话定位改版(每项目从 REGISTRY.sessions 取 intake)。
+# 0.21.0(2026-09-06,kr-pm-review):新增 tool-subagent-pm 工具行(产品经理角色,设计用户视角
+#   评审前置);coordinator 行 allow 增 subagent_pm。
 # ============================================================================
 
 # The `standard` agent preset: the full coding agent, mounted once per process.
@@ -304,6 +306,16 @@
         toolFilter:
           allow: [read, write, glob, grep, web_search, todo_write, project_budget, project_block]
 
+    - id: tool-subagent-pm
+      name: '@deepseek-ai/dsh-tool-subagent'
+      config:
+        provider: spawn
+        toolName: subagent_pm
+        backgroundMode: continuable
+        maxDepth: 4
+        toolFilter:
+          allow: [read, glob, grep, write, todo_write, project_budget, project_block]
+
     - id: tool-subagent-tester
       name: '@deepseek-ai/dsh-tool-subagent'
       config:
@@ -322,7 +334,7 @@
         backgroundMode: continuable
         maxDepth: 4
         toolFilter:
-          allow: [project_advance, project_gate, project_budget, project_status, project_harvest, project_audit, role_list, role_show, flow_list, flow_show, subagent_architect, subagent_deliverer, subagent_dev, subagent_product, subagent_tester, send_message, interrupt_agent, read, write, edit, glob, grep, todo_write, project_block]
+          allow: [project_advance, project_gate, project_budget, project_status, project_harvest, project_audit, role_list, role_show, flow_list, flow_show, subagent_architect, subagent_deliverer, subagent_dev, subagent_product, subagent_pm, subagent_tester, send_message, interrupt_agent, read, write, edit, glob, grep, todo_write, project_block]
 
     # Production dsh does not install these optional providers. Install the
     # matching Bundle in this Profile and restart the Host, then copy this

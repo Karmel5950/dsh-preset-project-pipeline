@@ -21,10 +21,11 @@ import {
   auditToolface,
 } from '../scripts/toolface-lib.mjs';
 
-// ── 干净样本(镜像生产 preset 当前态:kr-p4-route 已补 project_harvest)──────────
+// ── 干净样本(镜像生产 preset 当前态:kr-p4-route 已补 project_harvest;kr-pm-review 已补 pm)──
 const CLEAN_ROLES = [
-  { id: 'coordinator', tools: { allow: ['project_advance', 'project_gate', 'project_budget', 'project_status', 'role_list', 'role_show', 'flow_list', 'flow_show', 'send_message', 'interrupt_agent', 'read', 'write', 'edit', 'glob', 'grep', 'todo_write', 'project_block', 'project_harvest', 'project_audit', 'subagent_architect', 'subagent_deliverer', 'subagent_dev', 'subagent_product', 'subagent_tester'] } },
+  { id: 'coordinator', tools: { allow: ['project_advance', 'project_gate', 'project_budget', 'project_status', 'role_list', 'role_show', 'flow_list', 'flow_show', 'send_message', 'interrupt_agent', 'read', 'write', 'edit', 'glob', 'grep', 'todo_write', 'project_block', 'project_harvest', 'project_audit', 'subagent_architect', 'subagent_deliverer', 'subagent_dev', 'subagent_product', 'subagent_pm', 'subagent_tester'] } },
   { id: 'dev', tools: { allow: ['read', 'write', 'edit', 'glob', 'grep', 'pwsh', 'todo_write', 'send_message', 'project_budget', 'project_block', 'subagent_devhelper'] } },
+  { id: 'pm', tools: { allow: ['read', 'glob', 'grep', 'write', 'todo_write', 'project_budget', 'project_block'] } },
 ];
 
 const CLEAN_CORDIS = `
@@ -34,7 +35,7 @@ const CLEAN_CORDIS = `
     provider: spawn
     toolName: subagent_coordinator
     toolFilter:
-      allow: [project_advance, project_gate, project_budget, project_status, project_harvest, project_audit, role_list, role_show, flow_list, flow_show, subagent_architect, subagent_deliverer, subagent_dev, subagent_product, subagent_tester, send_message, interrupt_agent, read, write, edit, glob, grep, todo_write, project_block]
+      allow: [project_advance, project_gate, project_budget, project_status, project_harvest, project_audit, role_list, role_show, flow_list, flow_show, subagent_architect, subagent_deliverer, subagent_dev, subagent_product, subagent_pm, subagent_tester, send_message, interrupt_agent, read, write, edit, glob, grep, todo_write, project_block]
 - id: tool-subagent-dev
   name: '@deepseek-ai/dsh-tool-subagent'
   config:
@@ -42,25 +43,34 @@ const CLEAN_CORDIS = `
     toolName: subagent_dev
     toolFilter:
       allow: [read, write, edit, glob, grep, pwsh, todo_write, subagent_devhelper, send_message, project_budget, project_block]
+- id: tool-subagent-pm
+  name: '@deepseek-ai/dsh-tool-subagent'
+  config:
+    provider: spawn
+    toolName: subagent_pm
+    toolFilter:
+      allow: [read, glob, grep, write, todo_write, project_budget, project_block]
 `;
 
 // ── 解析 happy path ──────────────────────────────────────────────────────────
 test('parseRolesAllow:合法 roles 清单 → Map<roleId, Set<tool>>;坏条目跳过', () => {
   const map = parseRolesAllow(CLEAN_ROLES);
-  assert.equal(map.size, 2);
+  assert.equal(map.size, 3);
   assert.ok(map.get('coordinator').has('project_harvest'));
   assert.ok(map.get('dev').has('subagent_devhelper'));
+  assert.ok(map.get('pm').has('project_budget'));
   // 坏条目(缺 id / 缺 tools.allow)跳过不炸。
   const withBad = parseRolesAllow([...CLEAN_ROLES, { tools: { allow: ['read'] } }, { id: 'x' }, null, 'str']);
-  assert.equal(withBad.size, 2, '坏条目跳过');
+  assert.equal(withBad.size, 3, '坏条目跳过');
 });
 
 test('parseCordisPerRoleAllow:合法 agent.cordis.yml 文本 → Map<toolName, Set<tool>>', () => {
   const map = parseCordisPerRoleAllow(CLEAN_CORDIS);
-  assert.equal(map.size, 2);
+  assert.equal(map.size, 3);
   assert.ok(map.has('subagent_coordinator'));
   assert.ok(map.get('subagent_coordinator').has('project_harvest'));
   assert.ok(map.get('subagent_dev').has('subagent_devhelper'));
+  assert.ok(map.get('subagent_pm').has('project_budget'));
   // 非字符串输入 → 空 Map(不炸)。
   assert.equal(parseCordisPerRoleAllow(undefined).size, 0);
   assert.equal(parseCordisPerRoleAllow(42).size, 0);
@@ -76,6 +86,18 @@ test('roleToolName / toolNameToRole 互逆', () => {
 test('checkL1vsL2:干净样本无漂移(happy path)', () => {
   const drifts = checkL1vsL2(parseRolesAllow(CLEAN_ROLES), parseCordisPerRoleAllow(CLEAN_CORDIS));
   assert.deepEqual(drifts, [], 'roles 与 per-role 行逐字一致 → 无漂移');
+});
+
+test('pm 角色纳入 toolface 审计网:roles allow 与 per-role 行一致(AC1,toolface-cross-layer-consistency)', () => {
+  const rolesAllow = parseRolesAllow(CLEAN_ROLES);
+  const cordisAllow = parseCordisPerRoleAllow(CLEAN_CORDIS);
+  assert.ok(rolesAllow.has('pm'), 'roles 含 pm');
+  assert.ok(cordisAllow.has('subagent_pm'), 'cordis 含 subagent_pm 行');
+  const drifts = checkL1vsL2(rolesAllow, cordisAllow);
+  assert.deepEqual(drifts, [], 'pm roles allow 与 per-role 行一致');
+  // pm 白名单 ⊆ 真实工具面(L2vsL3 + L1vsL3)。
+  assert.deepEqual(checkL2vsL3(cordisAllow, REAL_TOOL_SURFACE), [], 'pm 行工具 ∈ 真实面');
+  assert.deepEqual(checkL1vsL3(rolesAllow, REAL_TOOL_SURFACE), [], 'pm roles 工具 ∈ 真实面');
 });
 
 test('checkL1vsL2:kr-p4-route 事故根因——roles allow 有 project_harvest 而 per-role 行没有', () => {

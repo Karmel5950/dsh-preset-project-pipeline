@@ -2457,3 +2457,25 @@ export function sedimentThresholdMet(registries, threshold) {
   }
   return { triggered: false, count, threshold: N };
 }
+
+// ── PM 评审轮次决策(kr-pm-review,0.21.0,2026-09-06)────────────────────────
+// PM 评审回路轮次规则的可测参考实现(纯函数,单测锁定语义)。协调者按阶段 note 文本 +
+// 流程数据(.dsh-project/pm-review.json)维护轮次,不直接调用本函数(协调者无 direct lib
+// 调用通道);规则语义由单测保证,行为由 note 文本引导。只增不改、零 npm import。
+
+/**
+ * PM 评审轮次决策(纯函数,AC3 单测锁定)。
+ * 输入:{ round(当前轮次,≥1), verdict('pass'|'revise'), maxRounds(默认 3) }。
+ * 返回:{ action: 'pass'|'revise'|'escalate', nextRound? }。
+ * 规则:
+ *   - verdict='pass' → { action:'pass' }(通过,推进);
+ *   - verdict='revise' 且 round >= maxRounds → { action:'escalate' }(超限升级呈用户);
+ *   - verdict='revise' 且 round < maxRounds → { action:'revise', nextRound: round+1 }(回 architect 返工重评)。
+ * maxRounds 非法(非正整数)→ 回退默认 3。
+ */
+export function pmRoundDecision({ round, verdict, maxRounds = 3 } = {}) {
+  const max = Number.isSafeInteger(maxRounds) && maxRounds > 0 ? maxRounds : 3;
+  if (verdict === 'pass') return { action: 'pass' };
+  if (round >= max) return { action: 'escalate' };
+  return { action: 'revise', nextRound: round + 1 };
+}
