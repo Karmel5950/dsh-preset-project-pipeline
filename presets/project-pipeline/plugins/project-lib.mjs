@@ -2306,6 +2306,169 @@ export function validateAcceptanceRouting(entries) {
   return errors.length === 0 ? { ok: true, errors: [] } : { ok: false, errors };
 }
 
+// ── deploy-restart 路由前置(机制一,kr-deploy-route-bump,0.22.0)───────────
+// 扩 kr-accept-route:clarify 部署可行性章结论为「需重启/部署组件变更」(r3)时,SPEC
+// 必须同步前置声明 deploy-restart 路由——front-matter 顶层 `deploy-restart: true`
+// 标记 + acceptance-routing 块对受影响 AC 声明 `user-blocking|deploy-restart`;
+// delivery-gate 机械核对覆盖(仅校验已声明项;标记未声明 → 不强制,存量零影响)。
+// kr-accept-route 四类触发类本已含 deploy-restart,本机制一补「路由声明前置化 +
+// delivery-gate 核对覆盖该路由」,不重加触发类。只增不改、零 npm import、纯函数便于单测。
+
+/** SPEC front-matter 顶层布尔标记 key:deploy-restart(true=部署需重启/组件变更,命中 r3)。 */
+export const DEPLOY_RESTART_MARKER_KEY = 'deploy-restart';
+
+/**
+ * 解析 SPEC front-matter 顶层的 `deploy-restart: true|false` 布尔标记。
+ * 返回 true|false|undefined:缺 front-matter / 未闭合 / 缺键 / 解析失败 → undefined(不炸)。
+ * (机制一:部署可行性章结论为需重启/部署组件变更的机械钩子。)
+ */
+export function parseDeployRestartMarker(specText) {
+  if (typeof specText !== 'string' || specText.length === 0) return undefined;
+  if (!specText.startsWith('---\n')) return undefined;
+  const end = specText.indexOf('\n---', 4);
+  if (end < 0) return undefined;
+  const block = specText.slice(4, end);
+  const m = /(?:^|\n)\s*deploy-restart\s*:\s*(true|false)\s*(?=\n|$)/.exec(block);
+  if (!m) return undefined;
+  return m[1] === 'true';
+}
+
+/**
+ * 机制一核对纯函数(deploy-restart 路由前置,AC1/AC2 单测锁定)。
+ * input: { deployRestart, entries }。deployRestart 经 parseDeployRestartMarker;
+ * entries 经 parseAcceptanceRouting(或手工构造)。
+ * 规则:
+ *   - deployRestart !== true → { ok:true, note }(标记未声明 → 不强制,存量/未声明零影响);
+ *   - deployRestart === true → entries 须含 ≥1 条 route==='user-blocking' && trigger==='deploy-restart',
+ *     否则 { ok:false, errors }(强制前置声明,防部署变更仅靠 gate 包部署自检兜住)。
+ * 返回 { ok, errors?, note? }。
+ */
+export function checkDeployRestartRouting({ deployRestart, entries }) {
+  if (deployRestart !== true) {
+    return { ok: true, note: 'deploy-restart 标记未声明(deploy-restart:true 未置),deploy-restart 路由前置核对跳过(存量/未声明零影响)' };
+  }
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return { ok: false, errors: ['deploy-restart:true(部署需重启/组件变更)时 acceptance-routing 块须含 deploy-restart 用户-blocking 声明;当前无 AC 条目'] };
+  }
+  const declared = entries.some((e) => e && e.route === 'user-blocking' && e.trigger === 'deploy-restart');
+  if (!declared) {
+    return { ok: false, errors: ['部署需重启/组件变更(r3)但 acceptance-routing 块未前置声明 deploy-restart 用户-blocking 路由——须在 clarify 对该受影响 AC 声明 user-blocking|deploy-restart(机制一:deploy-restart 路由前置)'] };
+  }
+  return { ok: true };
+}
+
+// ── build 交付检查单(机制二,kr-deploy-route-bump,0.22.0)──────────────────
+// 交付检查单强制含 ①语义化版本 bump(preset/插件 package.json)②CHANGELOG 条目;
+// 任一缺失 → delivery-gate 不得呈递。承载:dev 产出 deliverables/.delivery-checklist.json
+// (结构化清单,含版本 bump 与 CHANGELOG 条目文案)+ APPLY.md 生成规范(标注目标版本 +
+// CHANGELOG 条目随交付一并产出)+ delivery-gate 机械核对(读清单校验)。
+// 只增不改、零 npm import。
+
+/** 交付检查单文件相对路径(项目根起,dev 产出到 deliverables/)。 */
+export const DELIVERY_CHECKLIST_REL_PATH = 'deliverables/.delivery-checklist.json';
+
+/** 合法语义化版本 bump 类型。 */
+export const SEMVER_BUMP_TYPES = ['major', 'minor', 'patch'];
+
+/**
+ * 校验字符串是否为合法语义化版本(X.Y.Z,数字段;可带 -/+ 后缀)。纯函数。
+ */
+export function isValidSemver(v) {
+  if (typeof v !== 'string') return false;
+  return /^\d+\.\d+\.\d+(?:[-+].*)?$/.test(v);
+}
+
+/** 版本 bump:major → X+1.0.0 / minor → X.Y+1.0 / patch → X.Y.Z+1;非法/未知 type → null。 */
+export function bumpSemver(v, type) {
+  const m = (typeof v === 'string' ? v : '').match(/^(\d+)\.(\d+)\.(\d+)/);
+  if (!m) return null;
+  if (type === 'major') return `${Number(m[1]) + 1}.0.0`;
+  if (type === 'minor') return `${m[1]}.${Number(m[2]) + 1}.0`;
+  if (type === 'patch') return `${m[1]}.${m[2]}.${Number(m[3]) + 1}`;
+  return null;
+}
+
+/** 版本比较:a > b(语义化;非 semver 视为 0)。 */
+export function gtSemver(a, b) {
+  const pa = (typeof a === 'string' ? a : '').match(/\d+/g) ?? [];
+  const pb = (typeof b === 'string' ? b : '').match(/\d+/g) ?? [];
+  for (let i = 0; i < 3; i++) {
+    const va = Number(pa[i] ?? 0);
+    const vb = Number(pb[i] ?? 0);
+    if (va !== vb) return va > vb;
+  }
+  return false;
+}
+
+/**
+ * 校验交付检查单(纯函数,AC3 单测锁定)。
+ * list: { packageName, packageFile, currentVersion, targetVersion, semverBump, changelogEntry }。
+ * 规则:
+ *   - packageName / packageFile 非空字符串;
+ *   - currentVersion / targetVersion 均为合法 semver,且 targetVersion > currentVersion(向上递增);
+ *   - semverBump ∈ SEMVER_BUMP_TYPES;
+ *   - changelogEntry 非空字符串(CHANGELOG 条目文案随交付一并产出)。
+ * 返回 { ok:true, errors:[] } 或 { ok:false, errors: string[] }。
+ */
+export function validateDeliveryChecklist(list) {
+  const errors = [];
+  if (list === null || typeof list !== 'object') return { ok: false, errors: ['交付检查单必须是对象'] };
+  for (const k of ['packageName', 'packageFile']) {
+    if (typeof list[k] !== 'string' || list[k].length === 0) {
+      errors.push(`交付检查单 ${k} 必填(非空字符串)`);
+    }
+  }
+  if (!isValidSemver(list.currentVersion)) {
+    errors.push(`交付检查单 currentVersion 须为合法 semver(X.Y.Z),得到 ${JSON.stringify(list.currentVersion)}`);
+  }
+  if (!isValidSemver(list.targetVersion)) {
+    errors.push(`交付检查单 targetVersion 须为合法 semver(X.Y.Z),得到 ${JSON.stringify(list.targetVersion)}`);
+  } else if (isValidSemver(list.currentVersion) && !gtSemver(list.targetVersion, list.currentVersion)) {
+    errors.push(`交付检查单 targetVersion(${list.targetVersion}) 须 > currentVersion(${list.currentVersion})(版本语义向上递增)`);
+  }
+  if (!SEMVER_BUMP_TYPES.includes(list.semverBump)) {
+    errors.push(`交付检查单 semverBump 须为 ${SEMVER_BUMP_TYPES.join('/')} 之一,得到 ${JSON.stringify(list.semverBump)}`);
+  }
+  if (typeof list.changelogEntry !== 'string' || list.changelogEntry.trim().length === 0) {
+    errors.push('交付检查单 changelogEntry 必填(非空字符串)——CHANGELOG 条目文案随交付一并产出');
+  }
+  return errors.length === 0 ? { ok: true, errors: [] } : { ok: false, errors };
+}
+
+/**
+ * 生成交付检查单(纯函数,AC4 单测锁定):由 currentVersion + semverBump 推导 targetVersion
+ * (显式 targetVersion 优先),连同 packageName/packageFile/changelogEntry 组装清单对象并校验。
+ * 返回 { ok:true, checklist } 或 { ok:false, error|errors }。
+ */
+export function buildDeliveryChecklist(input) {
+  const { packageName, packageFile, currentVersion, semverBump = 'minor', changelogEntry, targetVersion } = input ?? {};
+  if (!isValidSemver(currentVersion)) {
+    return { ok: false, error: `交付检查单 currentVersion 须为合法 semver(X.Y.Z),得到 ${JSON.stringify(currentVersion)}` };
+  }
+  if (!SEMVER_BUMP_TYPES.includes(semverBump)) {
+    return { ok: false, error: `交付检查单 semverBump 须为 ${SEMVER_BUMP_TYPES.join('/')} 之一,得到 ${JSON.stringify(semverBump)}` };
+  }
+  if (typeof changelogEntry !== 'string' || changelogEntry.trim().length === 0) {
+    return { ok: false, error: '交付检查单 changelogEntry 必填(非空字符串)——CHANGELOG 条目文案随交付一并产出' };
+  }
+  const computed = targetVersion ?? bumpSemver(currentVersion, semverBump);
+  if (!isValidSemver(computed)) {
+    return { ok: false, error: `targetVersion 推导失败(currentVersion=${JSON.stringify(currentVersion)},semverBump=${JSON.stringify(semverBump)})` };
+  }
+  const checklist = {
+    schemaVersion: 1,
+    packageName,
+    packageFile,
+    currentVersion,
+    targetVersion: computed,
+    semverBump,
+    changelogEntry,
+  };
+  const chk = validateDeliveryChecklist(checklist);
+  if (!chk.ok) return { ok: false, errors: chk.errors };
+  return { ok: true, checklist };
+}
+
 // ── 门禁授权源校验(kr-gate-auth,0.20.0,2026-09-05)────────────────────────
 // project_gate approve 强制携带主线程裁决指针(rulingRef)。三形态(主线程定稿,
 // 方案 1 + 书面补充裁决,三选一允许组合):

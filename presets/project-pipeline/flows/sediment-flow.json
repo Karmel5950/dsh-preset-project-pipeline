@@ -3,10 +3,10 @@
   "id": "sediment-flow",
   "version": 1,
   "stages": [
-    { "id": "clarify", "type": "work", "role": "product", "produces": ["SPEC.md"], "note": "沉淀项目规格:需求=批量沉淀职责(跑 project_audit 审计轮、失败模式聚合、按 harvest-merge/lesson-lifecycle 纪律整固 lesson 库、回顾审计规则与消费路由、落库+留痕);五维可行性照做;SPEC 头部 front-matter 含 acceptance-routing 块(AC 对照表路由声明,四类真机触发类 real-session/visual-browser/deploy-restart/real-upstream-credential 声明 user-blocking)" },
+    { "id": "clarify", "type": "work", "role": "product", "produces": ["SPEC.md"], "note": "沉淀项目规格:需求=批量沉淀职责(跑 project_audit 审计轮、失败模式聚合、按 harvest-merge/lesson-lifecycle 纪律整固 lesson 库、回顾审计规则与消费路由、落库+留痕);五维可行性照做;SPEC 头部 front-matter 含 acceptance-routing 块(AC 对照表路由声明,四类真机触发类 real-session/visual-browser/deploy-restart/real-upstream-credential 声明 user-blocking);部署可行性章结论为「需重启/部署组件变更」(r3)时,front-matter 顶层 deploy-restart:true 且对该受影响 AC 声明 user-blocking|deploy-restart(机制一)" },
     { "id": "build", "type": "work", "role": "dev", "produces": ["code"], "note": "沉淀职责实现要点与取舍直接写入 journal;遵循项目既有风格,自测通过即提交" },
     { "id": "test", "type": "work", "role": "tester", "note": "独立验证不信任自测;无法真实验证的项如实 project_block,禁止静态替代放行" },
-    { "id": "delivery-gate", "type": "gate", "title": "交付验收", "present": ["DELIVERY.md"], "note": "沉淀项目唯一门禁:用户侧裁决即最终验收;机械核对 AC 对照表路由声明(读 SPEC.md acceptance-routing;声明是纪律引导,核对只校验已声明项——块存在 → 四类真机触发类须声明 user-blocking,非法拒绝;块缺失(存量/未声明)→ 不拒绝,呈递包加观察行);含视觉/真实环境等无法模型验证的项须在此前列为用户侧 blocking" },
+    { "id": "delivery-gate", "type": "gate", "title": "交付验收", "present": ["DELIVERY.md"], "note": "沉淀项目唯一门禁:用户侧裁决即最终验收;机械核对 AC 对照表路由声明(读 SPEC.md acceptance-routing;声明是纪律引导,核对只校验已声明项——块存在 → 四类真机触发类须声明 user-blocking,非法拒绝;块缺失(存量/未声明)→ 不拒绝,呈递包加观察行);机制一:deploy-restart:true 时须含 deploy-restart 声明,否则拒绝;机制二:部署需重启时强制交付检查单(版本 bump + CHANGELOG,经 deliverables/.delivery-checklist.json 机械核对),缺失不得呈递;含视觉/真实环境等无法模型验证的项须在此前列为用户侧 blocking" },
     { "id": "wrap", "type": "summary", "note": "结项总结从简:目标/结果/已知限制" },
     { "id": "harvest", "type": "internalize", "note": "沉淀内化(必须按以下顺序以工具真实执行,产出以工具返回为准写入 SUMMARY,禁止以 pwsh/写文件绕过工具或以自述代替):①调 project_audit(action=run) 执行审计轮,发现数/分流动作/去重限频结果原样记录;②调 project_harvest(rebuild-index) 重建 lessons-index.json(保留 hits、应用 stale 候选);③失败模式聚合报告写 SUMMARY;④lesson 库整固(harvest-merge/lesson-lifecycle 纪律);⑤回顾审计规则与消费路由。审计轮产出 0 动作时也须在 SUMMARY 记录「0 actions + 去重数」,工具返回即证据。" }
   ]

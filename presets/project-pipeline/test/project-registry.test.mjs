@@ -36,6 +36,7 @@ import {
   validateStageList,
   writeJson,
   returnHashOf,
+  DELIVERY_CHECKLIST_REL_PATH,
 } from '../plugins/project-lib.mjs';
 import { makeStubCtx } from '../../../toolkit/stub-ctx.mjs';
 
@@ -197,7 +198,7 @@ test('插件元数据:8 个工具 + 1 条手册提示段(注册常驻,不接线 
   const section = ctx.systemPrompt.items[0];
   assert.equal(section.name, 'project-pipeline/manual');
   assert.equal(section.order, 140);
-  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'project_harvest', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked', 'id 入参', 'runtime-events', 'projcache', 'sessions', '底座', 'entitySlug', 'readings', 'MAX_COMPILED_PERSONA', '消费路由', 'negative-premises', 'lessons-index', 'totalToken', 'cacheRate', 'byModel', 'unknown', 'model 来源说明', '自省审计回路', 'project_audit', 'audit-rules', 'audit-trail', '证据链', '验收路由前置化', 'acceptance-routing', 'user-blocking', 'real-session', 'visual-browser', 'deploy-restart', 'real-upstream-credential', '批量沉淀机制', 'sedimentation', '沉淀', 'sediment-flow', '已达沉淀阈值']) {
+  for (const word of [...STAGE_TYPES, 'project_register', 'project_advance', 'project_gate', 'project_budget commit', 'project_status', 'project_block', 'project_harvest', 'role_show', 'flow_show', 'self-report', '.dsh-project', 'settlement', '可行性分析', '卡点纪律', '既定裁决库', '失败模式聚合', '部署自检', 'parked', 'id 入参', 'runtime-events', 'projcache', 'sessions', '底座', 'entitySlug', 'readings', 'MAX_COMPILED_PERSONA', '消费路由', 'negative-premises', 'lessons-index', 'totalToken', 'cacheRate', 'byModel', 'unknown', 'model 来源说明', '自省审计回路', 'project_audit', 'audit-rules', 'audit-trail', '证据链', '验收路由前置化', 'acceptance-routing', 'user-blocking', 'real-session', 'visual-browser', 'deploy-restart', 'real-upstream-credential', '批量沉淀机制', 'sedimentation', '沉淀', 'sediment-flow', '已达沉淀阈值', 'deploy-restart 路由前置', 'build 交付检查单', '.delivery-checklist.json', '版本 bump', 'CHANGELOG']) {
     assert.ok(section.text.includes(word), `手册段应包含 ${word}`);
   }
 });
@@ -2016,6 +2017,29 @@ async function writeSpec(workspace, projectId, routingLines) {
   await writeFile(join(workspace, projectId, 'SPEC.md'), spec, 'utf8');
 }
 
+/** 写 SPEC.md(带 deploy-restart 标记 + acceptance-routing front-matter)。 */
+async function writeSpecDeploy(workspace, projectId, { deployRestart = true, routingLines = [] } = {}) {
+  const body = routingLines.map((l) => `  ${l}`).join('\n');
+  const spec = `---\ndeploy-restart: ${deployRestart}\nacceptance-routing:\n${body}\n---\n# SPEC\n正文`;
+  await writeFile(join(workspace, projectId, 'SPEC.md'), spec, 'utf8');
+}
+
+/** 写 deliverables/.delivery-checklist.json(交付检查单)。 */
+async function writeChecklist(workspace, projectId, list) {
+  const file = join(workspace, projectId, DELIVERY_CHECKLIST_REL_PATH);
+  await mkdir(join(file, '..'), { recursive: true });
+  await writeFile(file, JSON.stringify(list, null, 2), 'utf8');
+}
+
+/** 快捷推进到 delivery-gate 并 present。 */
+async function presentDelivery(ctx, workspace, projectId) {
+  const context = sessionContext(workspace);
+  await getTool(ctx, 'project_advance').execute({ projectId }, context); // → delivery-gate
+  return getTool(ctx, 'project_gate').execute({
+    projectId, stageId: 'delivery-gate', action: 'present', package: { summary: 's' },
+  }, context);
+}
+
 test('delivery-gate present:合法 SPEC(四类触发类声明 user-blocking)→ 通过(AC1/AC2 单测)', async (t) => {
   const workspace = await makeWorkspace(t);
   await writeTemplate(workspace, 'delivery-flow', DELIVERY_STAGES);
@@ -2109,6 +2133,84 @@ test('delivery-gate present:非 delivery-gate 门禁不受机械核对影响(回
     projectId, stageId: 'review', action: 'present', package: { summary: 's' },
   }, context);
   assert.equal(present.gateStatus, 'pending', '非 delivery-gate 门禁照常呈递');
+});
+
+// ── 机制一+二(0.22.0,kr-deploy-route-bump):deploy-restart 路由前置 + 交付检查单 ──
+
+test('delivery-gate present:deploy-restart:true 且缺 deploy-restart 声明 → 拒绝呈递(机制一)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'delivery-flow', DELIVERY_STAGES);
+  const ctx = await mountPlugin();
+  await getTool(ctx, 'project_register').execute({ title: 'DR Missing', id: 'dr-missing', requirement: 'r', flowTemplate: 'delivery-flow' }, sessionContext(workspace));
+  await writeSpecDeploy(workspace, 'dr-missing', { deployRestart: true, routingLines: ['AC1: model-verifiable', 'AC2: user-blocking|visual-browser'] });
+  await assert.rejects(
+    () => presentDelivery(ctx, workspace, 'dr-missing'),
+    /deploy-restart/,
+    'deploy-restart:true 但未声明 deploy-restart 路由 → 拒绝呈递(机制一强制前置)',
+  );
+});
+
+test('delivery-gate present:deploy-restart:true + 已声明 deploy-restart 但缺交付检查单 → 拒绝呈递(机制二)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'delivery-flow', DELIVERY_STAGES);
+  const ctx = await mountPlugin();
+  await getTool(ctx, 'project_register').execute({ title: 'DR NoChecklist', id: 'dr-nocl', requirement: 'r', flowTemplate: 'delivery-flow' }, sessionContext(workspace));
+  await writeSpecDeploy(workspace, 'dr-nocl', { deployRestart: true, routingLines: ['AC1: model-verifiable', 'AC6: user-blocking|deploy-restart'] });
+  await assert.rejects(
+    () => presentDelivery(ctx, workspace, 'dr-nocl'),
+    /\.delivery-checklist\.json/,
+    '部署需重启但缺交付检查单 → 拒绝呈递(机制二缺失不得呈递)',
+  );
+});
+
+test('delivery-gate present:deploy-restart:true + 声明齐全 + 交付检查单完整 → 通过(机制一+二 happy path)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'delivery-flow', DELIVERY_STAGES);
+  const ctx = await mountPlugin();
+  await getTool(ctx, 'project_register').execute({ title: 'DR Ok', id: 'dr-ok', requirement: 'r', flowTemplate: 'delivery-flow' }, sessionContext(workspace));
+  await writeSpecDeploy(workspace, 'dr-ok', { deployRestart: true, routingLines: ['AC1: model-verifiable', 'AC6: user-blocking|deploy-restart'] });
+  await writeChecklist(workspace, 'dr-ok', {
+    packageName: 'dsh-preset-project-pipeline',
+    packageFile: 'presets/project-pipeline/package.json',
+    currentVersion: '0.21.0',
+    targetVersion: '0.22.0',
+    semverBump: 'minor',
+    changelogEntry: 'kr-accept-route 扩 deploy-restart 路由前置;build 交付检查单:版本 bump + CHANGELOG 强制',
+  });
+  const present = await presentDelivery(ctx, workspace, 'dr-ok');
+  assert.equal(present.gateStatus, 'pending', '机制一+二齐全 → 呈递成功');
+});
+
+test('delivery-gate present:deploy-restart:true + 交付检查单缺 changelogEntry → 拒绝呈递(机制二 AC3)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'delivery-flow', DELIVERY_STAGES);
+  const ctx = await mountPlugin();
+  await getTool(ctx, 'project_register').execute({ title: 'DR BadCL', id: 'dr-badcl', requirement: 'r', flowTemplate: 'delivery-flow' }, sessionContext(workspace));
+  await writeSpecDeploy(workspace, 'dr-badcl', { deployRestart: true, routingLines: ['AC1: model-verifiable', 'AC6: user-blocking|deploy-restart'] });
+  await writeChecklist(workspace, 'dr-badcl', {
+    packageName: 'dsh-preset-project-pipeline',
+    packageFile: 'presets/project-pipeline/package.json',
+    currentVersion: '0.21.0',
+    targetVersion: '0.22.0',
+    semverBump: 'minor',
+    changelogEntry: '',
+  });
+  await assert.rejects(
+    () => presentDelivery(ctx, workspace, 'dr-badcl'),
+    /changelogEntry/,
+    '交付检查单缺 CHANGELOG 条目 → 拒绝呈递(机制二)',
+  );
+});
+
+test('delivery-gate present:deploy-restart 未声明(true 未置)→ 不强制交付检查单(存量零影响)', async (t) => {
+  const workspace = await makeWorkspace(t);
+  await writeTemplate(workspace, 'delivery-flow', DELIVERY_STAGES);
+  const ctx = await mountPlugin();
+  await getTool(ctx, 'project_register').execute({ title: 'DR NoMarker', id: 'dr-nomark', requirement: 'r', flowTemplate: 'delivery-flow' }, sessionContext(workspace));
+  // 无 deploy-restart 标记(存量/未声明),仅 acceptance-routing 块合法。
+  await writeSpec(workspace, 'dr-nomark', ['AC1: model-verifiable', 'AC2: user-blocking|real-session']);
+  const present = await presentDelivery(ctx, workspace, 'dr-nomark');
+  assert.equal(present.gateStatus, 'pending', 'deploy-restart 标记未声明 → 不强制交付检查单,放行(存量零影响)');
 });
 
 // ── 批量沉淀机制(0.18.0,kr-sediment-batch):advance-to-delivered 触发指令 ──

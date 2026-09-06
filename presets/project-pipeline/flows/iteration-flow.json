@@ -4,10 +4,10 @@
   "version": 1,
   "stages": [
     { "id": "prelude", "type": "work", "role": "coordinator", "note": "读底座 + 上轮 STATE → 增量更新底座(STATE/DECISIONS),为后续角色提供跨迭代接续上下文" },
-    { "id": "clarify", "type": "work", "role": "product", "produces": ["SPEC.md"], "note": "迭代需求澄清(增量,引用底座避免全量重读);entity 无底座时扩展产出底座初稿四件套;SPEC 头部 front-matter 含 acceptance-routing 块(AC 对照表路由声明,四类真机触发类 real-session/visual-browser/deploy-restart/real-upstream-credential 声明 user-blocking)" },
+    { "id": "clarify", "type": "work", "role": "product", "produces": ["SPEC.md"], "note": "迭代需求澄清(增量,引用底座避免全量重读);entity 无底座时扩展产出底座初稿四件套;SPEC 头部 front-matter 含 acceptance-routing 块(AC 对照表路由声明,四类真机触发类 real-session/visual-browser/deploy-restart/real-upstream-credential 声明 user-blocking);部署可行性章结论为「需重启/部署组件变更」(r3)时,front-matter 顶层 deploy-restart:true 且对该受影响 AC 声明 user-blocking|deploy-restart(机制一)" },
     { "id": "build", "type": "work", "role": "dev", "produces": ["code"] },
     { "id": "test", "type": "work", "role": "tester" },
-    { "id": "delivery-gate", "type": "gate", "title": "交付验收", "present": ["DELIVERY.md"], "note": "机械核对 AC 对照表路由声明(读 SPEC.md acceptance-routing;声明是纪律引导,核对只校验已声明项——块存在 → 四类真机触发类须声明 user-blocking,非法拒绝;块缺失(存量/未声明)→ 不拒绝,呈递包加观察行);含视觉/真实环境等无法模型验证的项须在此前列为用户侧 blocking" },
+    { "id": "delivery-gate", "type": "gate", "title": "交付验收", "present": ["DELIVERY.md"], "note": "机械核对 AC 对照表路由声明(读 SPEC.md acceptance-routing;声明是纪律引导,核对只校验已声明项——块存在 → 四类真机触发类须声明 user-blocking,非法拒绝;块缺失(存量/未声明)→ 不拒绝,呈递包加观察行);机制一:deploy-restart:true 时须含 deploy-restart 声明,否则拒绝;机制二:部署需重启时强制交付检查单(版本 bump + CHANGELOG,经 deliverables/.delivery-checklist.json 机械核对),缺失不得呈递;含视觉/真实环境等无法模型验证的项须在此前列为用户侧 blocking" },
     { "id": "wrap", "type": "summary" },
     { "id": "harvest", "type": "work", "role": "coordinator", "note": "更新底座 STATE/DECISIONS(增量维护,跨迭代存活)" }
   ]

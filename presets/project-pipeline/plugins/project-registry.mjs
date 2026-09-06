@@ -138,6 +138,10 @@ import {
   ACCEPTANCE_TRIGGER_CLASSES,
   parseAcceptanceRouting,
   validateAcceptanceRouting,
+  parseDeployRestartMarker,
+  checkDeployRestartRouting,
+  validateDeliveryChecklist,
+  DELIVERY_CHECKLIST_REL_PATH,
   DEFAULT_SEDIMENT_THRESHOLD,
   DEFAULT_SEDIMENTATION,
   SEDIMENT_FLOW_TEMPLATE,
@@ -557,14 +561,21 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
   }
 
   /**
-   * 验收路由前置化机械核对(0.16.0,kr-accept-route,delivery-gate 第 1 轮 revise 返工):
+   * 验收路由前置化机械核对(0.16.0,kr-accept-route,delivery-gate 第 1 轮 revise 返工;
+   * 0.22.0,kr-deploy-route-bump 扩机制一):
    * 仅对 delivery-gate 阶段生效。读 <projectDir>/SPEC.md,解析 acceptance-routing 结构化
-   * 字段,调 project-lib 的 validateAcceptanceRouting 校验 AC 对照表路由声明。
+   * 字段,调 project-lib 的 validateAcceptanceRouting 校验 AC 对照表路由声明;再叠加机制一
+   * (deploy-restart 路由前置)核对:SPEC front-matter `deploy-restart:true` 时须含
+   * deploy-restart 用户-blocking 声明。
    * 行为(存量项目零影响):
    *   - SPEC.md 文件缺失 → throw(流水线契约违例,另一回事);
    *   - SPEC 存在但 acceptance-routing 块缺失(存量/未声明)→ 不拒绝,跳过核对,
    *     返回 { skipped:true, note }(delivery-gate 呈递包据此加观察行,缺口可见不阻断);
-   *   - 块存在 → 严格校验(非法/错路由 → throw 拒绝呈递,r4 语义)。
+   *   - 块存在 → 严格校验(非法/错路由 → throw 拒绝呈递,r4 语义);deploy-restart:true 且
+   *     未声明 deploy-restart 路由 → throw(机制一强制前置)。deploy-restart 标记未声明 →
+   *     不强制(存量零影响)。
+   * 返回 { deployRestart?:boolean }(部署需重启标记;供机制二交付检查单核对用)或
+   * { skipped:true, note }(块缺失)。
    * 非 delivery-gate 阶段直接返回 undefined(不影响既有门禁)。
    */
   async function checkAcceptanceRouting(paths, stageId) {
@@ -588,6 +599,44 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
     const checked = validateAcceptanceRouting(parsed.entries);
     if (!checked.ok) {
       throw new Error(`${name}/project_gate: delivery-gate 机械核对失败(AC 对照表路由声明非法):${checked.errors.join('; ')}`);
+    }
+    // 机制一(0.22.0,kr-deploy-route-bump):deploy-restart 路由前置核对。
+    const deployRestart = parseDeployRestartMarker(specText);
+    const drCheck = checkDeployRestartRouting({ deployRestart, entries: parsed.entries });
+    if (!drCheck.ok) {
+      throw new Error(`${name}/project_gate: delivery-gate 机械核对失败(deploy-restart 路由前置声明缺失):${drCheck.errors.join('; ')}`);
+    }
+    return { deployRestart: deployRestart === true };
+  }
+
+  /**
+   * build 交付检查单机械核对(机制二,0.22.0,kr-deploy-route-bump):
+   * 仅对 delivery-gate 阶段且部署需重启(deployRestart=true,即 preset/插件交付命中 r3)
+   * 生效。读 <projectDir>/deliverables/.delivery-checklist.json(dev 产出的结构化清单),
+   * 调 project-lib.validateDeliveryChecklist 校验是否含 ①语义化版本 bump ②CHANGELOG 条目。
+   * 前置条件(存量零影响):
+   *   - 非 delivery-gate 或 deployRestart !== true → 返回 undefined(不强制,存量零影响);
+   *   - deployRestart === true 且清单文件缺失/JSON 解析失败/校验不过 → throw 拒绝呈递
+   *     (「缺失不得呈递 delivery-gate」)。
+   */
+  async function checkDeliveryChecklist(paths, stageId, deployRestart) {
+    if (stageId !== 'delivery-gate' || deployRestart !== true) return undefined;
+    const cf = join(paths.projectDir, DELIVERY_CHECKLIST_REL_PATH);
+    let text;
+    try {
+      text = await readFile(cf, 'utf8');
+    } catch (error) {
+      throw new Error(`${name}/project_gate: 部署需重启(preset/插件交付,r3)须交 deliverables/${DELIVERY_CHECKLIST_REL_PATH}(含版本 bump + CHANGELOG):${error?.code ?? error?.message ?? error}`);
+    }
+    let list;
+    try {
+      list = JSON.parse(text);
+    } catch (error) {
+      throw new Error(`${name}/project_gate: 交付检查单 JSON 解析失败:${error?.message ?? error}`);
+    }
+    const chk = validateDeliveryChecklist(list);
+    if (!chk.ok) {
+      throw new Error(`${name}/project_gate: 交付检查单校验失败(版本 bump + CHANGELOG 缺失/非法):${chk.errors.join('; ')}`);
     }
     return undefined;
   }
@@ -1201,10 +1250,12 @@ function makeApi({ cfg, presetDir, logger, ctx }) {
       if (pkg.recommendation !== undefined && typeof pkg.recommendation !== 'string') {
         throw new Error(`${name}/project_gate: package.recommendation 必须是字符串`);
       }
-      // 验收路由前置化(0.16.0,kr-accept-route):delivery-gate 机械核对 AC 对照表路由声明。
-      // 读 SPEC.md 解析 acceptance-routing 结构化字段,调 project-lib.validateAcceptanceRouting
-      // 校验;块存在 → 非法拒绝呈递(r4 语义);块缺失(存量/未声明)→ 不拒绝,呈递包加观察行。
+      // 验收路由前置化(0.16.0,kr-accept-route)+ deploy-restart 路由前置(0.22.0,机制一)
+      // + build 交付检查单(0.22.0,机制二):delivery-gate 机械核对 AC 对照表路由声明;
+      // 部署需重启(preset/插件交付)时强制交付检查单(版本 bump + CHANGELOG)。
       const routingCheck = await checkAcceptanceRouting(paths, cur.id);
+      // 机制二(0.22.0):部署需重启(deployRestart=true)时校验交付检查单 —— 缺失不得呈递。
+      await checkDeliveryChecklist(paths, cur.id, routingCheck?.deployRestart === true);
       // 块缺失 → 观察行并入呈递包 materials(缺口可见但不阻断)。
       const presentPkg = routingCheck?.skipped
         ? { ...pkg, materials: [...(pkg.materials ?? []), routingCheck.note] }
@@ -2278,6 +2329,18 @@ SPEC(clarify 阶段)必须含「可行性分析」章,五维逐条给结论(可�
 - **r4 语义保持**:前置化是路由提前,不是验收口径变更;真机项仍由用户侧 blocking 执行,不得以静态放行替代。
 - **存量采用路径**:新项目 clarify 即声明 acceptance-routing 块;存量项目(legacy/in-flight)自然迭代时不强制回填——块缺失不阻断交付,仅呈递包留观察行。
 
+### deploy-restart 路由前置(机制一,0.22.0,kr-deploy-route-bump)
+- **目标**:扩 kr-accept-route——clarify 部署可行性章结论为「需重启/部署组件变更」(r3)时,SPEC 须同步前置声明 deploy-restart 路由;delivery-gate 机械核对覆盖(仅校验已声明项,存量零影响)。四类触发类本已含 deploy-restart,本机制一补「声明前置化 + delivery-gate 核对覆盖该路由」,不重加触发类。
+- **SPEC 承载(结构化字段)**:front-matter 顶层增 deploy-restart: true|false(true = 部署需重启/组件变更,命中 r3);且 acceptance-routing 块对受影响 AC 声明 user-blocking|deploy-restart。例:AC6: user-blocking|deploy-restart。
+- **delivery-gate 机械核对**:present 时解析 front-matter 的 deploy-restart 标记 + acceptance-routing 块,调 project-lib.checkDeployRestartRouting 校验——标记为 true → 须含 ≥1 条 deploy-restart 用户-blocking 声明,否则拒绝呈递;标记未声明(存量/未声明)→ 不强制,跳过核对(存量零影响)。既有三分支语义(块存在合法/畸形拒绝/块缺失放行+观察行)保持。
+- **r4 语义保持**:前置化是路由提前,不是验收口径变更;部署重启真机项仍由用户侧 blocking 执行,不得以静态放行替代。
+
+### build 交付检查单(机制二,0.22.0,kr-deploy-route-bump)
+- **目标**:交付检查单强制含 ①语义化版本 bump(preset/插件 package.json)②CHANGELOG 条目;缺失不得呈递 delivery-gate——补 preset-delivery-version-bump 纪律为机械核对。
+- **承载**:dev 产出 deliverables/.delivery-checklist.json(结构化清单,含 packageName/packageFile/currentVersion/targetVersion/semverBump/changelogEntry)+ APPLY.md 生成规范(标注目标版本号 + CHANGELOG 条目文案随 deliverables/ 一并产出)。
+- **版本语义**:能力新增 = minor(如 0.21.0 → 0.22.0);修复 = patch。targetVersion 须 > currentVersion(向上递增)。
+- **delivery-gate 机械核对**:部署需重启(deployRestart=true,preset/插件交付命中 r3)时,delivery-gate present 读 deliverables/.delivery-checklist.json 调 project-lib.validateDeliveryChecklist 校验——清单缺失/JSON 解析失败/校验不过(版本 bump 或 CHANGELOG 缺失)→ 拒绝呈递;非部署需重启(标记未声明)→ 不强制(存量零影响)。
+
 ### approve 授权源(0.20.0,kr-gate-auth)
 - **门禁 approve 必须携带主线程裁决指针(rulingRef)**,无指针的 approve 机械拒绝——门禁 approve 是用户否决点的核心,授权来源必须显式、可追溯。
 - **三形态(主线程定稿,方案 1 + 书面补充裁决,三选一允许组合)**:
@@ -2494,7 +2557,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register({
     name: 'project_gate',
-    description: '门禁两步制:present 把摘要/材料/建议写成门禁包(gates/NN-<stageId>.md)并置 pending;decide 记录用户裁决(approve/revise/reject)——revise 必给 reviseTo(work 阶段 id),reject 使项目终态。stageId 必须是当前阶段。**approve 授权源(0.20.0,kr-gate-auth)**:approve 必须携带 decision.rulingRef(主线程裁决指针,三形态:帧通道=帧 rpcId / 文本通道=裁决文件路径 / 兜底=裁决书整段原文摘录),无指针机械拒绝。**delivery-gate present 机械核对(0.16.0)**:读 SPEC.md 解析 acceptance-routing 结构化字段,校验 AC 对照表路由声明(四类真机触发类须声明 user-blocking);块存在 → 非法拒绝呈递;块缺失(存量/未声明)→ 不拒绝,呈递包加观察行。',
+    description: '门禁两步制:present 把摘要/材料/建议写成门禁包(gates/NN-<stageId>.md)并置 pending;decide 记录用户裁决(approve/revise/reject)——revise 必给 reviseTo(work 阶段 id),reject 使项目终态。stageId 必须是当前阶段。**approve 授权源(0.20.0,kr-gate-auth)**:approve 必须携带 decision.rulingRef(主线程裁决指针,三形态:帧通道=帧 rpcId / 文本通道=裁决文件路径 / 兜底=裁决书整段原文摘录),无指针机械拒绝。**delivery-gate present 机械核对(0.16.0,+0.22.0)**:读 SPEC.md 解析 acceptance-routing 结构化字段,校验 AC 对照表路由声明(四类真机触发类须声明 user-blocking);块存在 → 非法拒绝呈递;块缺失(存量/未声明)→ 不拒绝,呈递包加观察行。**机制一(0.22.0)**:front-matter `deploy-restart:true`(部署需重启/组件变更)时须含 deploy-restart 用户-blocking 声明,否则拒绝;标记未声明 → 不强制(存量零影响)。**机制二(0.22.0)**:部署需重启时须交 deliverables/.delivery-checklist.json(版本 bump + CHANGELOG),缺失不得呈递。',
     parameters: {
       type: 'object',
       additionalProperties: false,

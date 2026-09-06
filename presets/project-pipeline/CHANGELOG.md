@@ -1,3 +1,22 @@
+## [0.22.0] - 2026-09-06
+
+deploy-restart 路由前置 + build 交付检查单(kr-deploy-route-bump 交付;背景:失败模式聚合上抛两机制项——①test-env 类失败「部署/真机验收无法由流水线验证」重复发生,且实践单 API 层变更命中 r3 需重启的 deploy-restart 依赖仍靠 gate 包部署自检兜住、未在 clarify 前置声明;②交付物频繁缺 package.json 版本 bump 与 CHANGELOG 条目(G1:kr-board-time-token 由主线程代补 0.3.0 + CHANGELOG),preset-delivery-version-bump 纪律(hits=14)未机械化。用户裁决:合并为一张机制小单)。
+
+- **机制一:deploy-restart 路由前置(扩 kr-accept-route)** —— clarify 部署可行性章结论为「需重启/部署组件变更」(r3)时,SPEC 须同步前置声明 deploy-restart 路由;delivery-gate 机械核对覆盖(仅校验已声明项,存量零影响)。
+  - project-lib 只增不改(零 npm import):`DEPLOY_RESTART_MARKER_KEY`(deploy-restart);`parseDeployRestartMarker(specText)` 解析 SPEC front-matter 顶层 `deploy-restart: true|false` 布尔标记(缺 front-matter/未闭合/缺键/非法 → undefined 不炸);`checkDeployRestartRouting({ deployRestart, entries })` —— 标记为 true → entries 须含 ≥1 条 `user-blocking|deploy-restart`,否则拒绝;标记未声明 → 放行并带 note(存量/未声明零影响)。kr-accept-route 四类触发类本已含 deploy-restart,本机制一补「路由声明前置化 + delivery-gate 核对覆盖该路由」,不重加触发类。
+  - delivery-gate 机械核对(project-registry):`checkAcceptanceRouting` 在 validateAcceptanceRouting 通过后叠加 `checkDeployRestartRouting`——部署需重启但未声明 deploy-restart 路由 → 拒绝呈递;既有三分支语义(块存在合法/畸形拒绝/块缺失放行+观察行)保持。
+  - flow 模板(standard/iteration/sediment + workspace lite-flow)clarify note 增补「部署可行性章结论需重启时 front-matter deploy-restart:true 且对该受影响 AC 声明 user-blocking|deploy-restart」;delivery-gate note 增补部署前置核对句。role manifest(product/ dev)对应检查清单/纪律增补。
+  - MANUAL_TEXT 增「deploy-restart 路由前置」小节。
+- **机制二:build 交付检查单(版本 bump + CHANGELOG 强制)** —— 交付检查单强制含 ①语义化版本 bump(preset/插件 package.json)②CHANGELOG 条目;缺失不得呈递 delivery-gate。
+  - project-lib 只增不改:`DELIVERY_CHECKLIST_REL_PATH`(deliverables/.delivery-checklist.json)/ `SEMVER_BUMP_TYPES`(major/minor/patch)/ `isValidSemver`/ `bumpSemver`/ `gtSemver`;`validateDeliveryChecklist(list)`(版本 bump + CHANGELOG 齐备 → 通过,缺任一/非法 → 拒绝,targetVersion 须 > currentVersion 向上递增);`buildDeliveryChecklist(input)`(由 currentVersion + semverBump 推导 targetVersion 并组装+校验)。
+  - delivery-gate 机械核对(project-registry):`checkDeliveryChecklist` —— 仅在部署需重启(deployRestart=true,preset/插件交付命中 r3)时强制;读 deliverables/.delivery-checklist.json,清单缺失/JSON 解析失败/校验不过 → 拒绝呈递;标记未声明 → 不强制(存量零影响)。
+  - role manifest(dev)检查清单增补:preset/插件交付须产出 deliverables/.delivery-checklist.json 与 APPLY.md(标注目标版本),缺失 delivery-gate 不得呈递。
+  - APPLY.md 生成规范:预设交付须标注目标版本号 + CHANGELOG 条目文案随 deliverables/ 一并产出。MANUAL_TEXT 增「build 交付检查单」小节。
+- 版本 0.21.0 → **0.22.0(minor)**:两机制能力新增(部署重启路由前置核对 + 交付检查单强制)。
+- 测试:project-lib 增机制一(parseDeployRestartMarker / checkDeployRestartRouting 三分支 + happy path)+ 机制二(isValidSemver/bumpSemver/gtSemver/validateDeliveryChecklist/buildDeliveryChecklist,happy path + 拒绝);project-registry 增 delivery-gate 机制一+二集成(部署需重启缺声明拒绝 / 缺交付检查单拒绝 / 全齐通过 / 缺 changelogEntry 拒绝 / 标记未声明放行);project-roles persona 长度断言随 dev/product 增补同步;project-registry MANUAL_TEXT 词表增补。覆盖仓库全部相关测试文件(selftest-must-cover-repo-test-files),新增逻辑分支均有 happy path 测试(test-coverage-happy-path)。
+- **AC6 部署(r3)**:deploy 至 IN SYNC + 重启后本机制生效(behavior 探针:deploy-restart:true 且缺检查单的 delivery-gate present 被机械拒绝),由用户侧 blocking 执行;流水线只做单测/桩预演核对。
+- 触点:presets/project-pipeline/(project-lib.mjs、project-registry.mjs、flows/、roles/、test/、package.json、CHANGELOG)+ pipeline-ws/.dsh-library/flows/lite-flow.json → **r2 交付 deliverables/ + APPLY.md** + **r3 deploy 至 IN SYNC + 重启**(重启窗口并入攒批)。
+
 ## [0.21.0] - 2026-09-06
 
 流水线产品经理角色——设计的用户视角评审前置(kr-pm-review 交付;背景:用户此前否决过一版设置 UI(kr-control-plane v0.19.0「可用性,易用性几乎为 0,打回去重做」),并在 kr-control-plane-i2 的 design-gate 再次确认:不想反复亲审设计,希望流水线内部先把可用性关守住,用户只在终点做一次性确认。本单把这件事机制化:新增正式「产品经理(pm)」角色,设计类产出在到达用户/design-gate 之前,必须先经 PM 从用户视角评审并迭代到通过)。

@@ -60,6 +60,16 @@ import {
   ACCEPTANCE_TRIGGER_CLASSES,
   parseAcceptanceRouting,
   validateAcceptanceRouting,
+  DEPLOY_RESTART_MARKER_KEY,
+  parseDeployRestartMarker,
+  checkDeployRestartRouting,
+  DELIVERY_CHECKLIST_REL_PATH,
+  SEMVER_BUMP_TYPES,
+  isValidSemver,
+  bumpSemver,
+  gtSemver,
+  validateDeliveryChecklist,
+  buildDeliveryChecklist,
   validateRulingRef,
   DEFAULT_SEDIMENT_THRESHOLD,
   DEFAULT_SEDIMENTATION,
@@ -855,6 +865,136 @@ test('validateAcceptanceRouting:缺声明 / 错路由 → 拒绝(AC1)', () => {
 test('validateAcceptanceRouting:无 trigger(模型可验证)route 可为 model-verifiable 或 user-blocking', () => {
   assert.equal(validateAcceptanceRouting([{ ac: 'AC1', route: 'model-verifiable' }]).ok, true);
   assert.equal(validateAcceptanceRouting([{ ac: 'AC1', route: 'user-blocking' }]).ok, true, '无 trigger 也可声明 user-blocking(用户主动)');
+});
+
+// ── 机制一:deploy-restart 路由前置(0.22.0,kr-deploy-route-bump)────────────
+// parseDeployRestartMarker / checkDeployRestartRouting(AC1/AC2 单测锁定)。
+
+test('DEPLOY_RESTART_MARKER_KEY 常量钉死 + parseDeployRestartMarker 解析 front-matter 布尔标记(AC1)', () => {
+  assert.equal(DEPLOY_RESTART_MARKER_KEY, 'deploy-restart');
+  // true 标记。
+  assert.equal(parseDeployRestartMarker('---\ndeploy-restart: true\nacceptance-routing:\n  AC6: user-blocking|deploy-restart\n---\n# SPEC'), true, 'deploy-restart:true → true');
+  // false 标记。
+  assert.equal(parseDeployRestartMarker('---\ndeploy-restart: false\nacceptance-routing:\n  AC1: model-verifiable\n---'), false, 'deploy-restart:false → false');
+  // 缺键 / 缺 front-matter / 未闭合 / 非法值 → undefined(不炸)。
+  assert.equal(parseDeployRestartMarker('---\nacceptance-routing:\n  AC1: model-verifiable\n---'), undefined, '缺 deploy-restart 键 → undefined(存量/未声明)');
+  assert.equal(parseDeployRestartMarker('# 无 front-matter'), undefined, '缺 front-matter → undefined');
+  assert.equal(parseDeployRestartMarker('---\ndeploy-restart: true\n  AC1: model-verifiable'), undefined, '未闭合 → undefined');
+  assert.equal(parseDeployRestartMarker('---\ndeploy-restart: maybe\n---'), undefined, '非法布尔 → undefined');
+  assert.equal(parseDeployRestartMarker(''), undefined, '空文本 → undefined');
+});
+
+test('checkDeployRestartRouting:deploy-restart:true 且入口含 deploy-restart 声明 → 通过(AC2 happy path)', () => {
+  const checked = checkDeployRestartRouting({
+    deployRestart: true,
+    entries: [
+      { ac: 'AC1', route: 'model-verifiable' },
+      { ac: 'AC6', route: 'user-blocking', trigger: 'deploy-restart' },
+    ],
+  });
+  assert.equal(checked.ok, true, '部署需重启且已声明 deploy-restart → 通过');
+});
+
+test('checkDeployRestartRouting:deploy-restart:true 但缺 deploy-restart 声明 → 拒绝(AC2,机制一强制前置)', () => {
+  const checked = checkDeployRestartRouting({
+    deployRestart: true,
+    entries: [
+      { ac: 'AC1', route: 'model-verifiable' },
+      { ac: 'AC2', route: 'user-blocking', trigger: 'visual-browser' }, // 只有 visual-browser,无 deploy-restart
+    ],
+  });
+  assert.equal(checked.ok, false, '部署需重启但未声明 deploy-restart 路由 → 拒绝');
+  assert.ok(checked.errors[0].includes('deploy-restart'), '错误信息应点名 deploy-restart 声明缺失');
+});
+
+test('checkDeployRestartRouting:deploy-restart 未声明(true 未置)→ 放行(存量/未声明零影响)', () => {
+  const checked = checkDeployRestartRouting({
+    deployRestart: undefined,
+    entries: [{ ac: 'AC1', route: 'model-verifiable' }],
+  });
+  assert.equal(checked.ok, true, '标记未声明 → 不强制核对');
+  assert.ok(checked.note, '应带跳过说明 note');
+  // false 同样放行。
+  const checkedFalse = checkDeployRestartRouting({ deployRestart: false, entries: [] });
+  assert.equal(checkedFalse.ok, true, 'deploy-restart:false → 放行');
+});
+
+// ── 机制二:build 交付检查单(0.22.0,kr-deploy-route-bump)──────────────────
+// isValidSemver / bumpSemver / gtSemver / validateDeliveryChecklist / buildDeliveryChecklist(AC3/AC4)。
+
+test('isValidSemver / bumpSemver / gtSemver 纯函数(AC4 版本语义基础)', () => {
+  assert.equal(isValidSemver('0.21.0'), true);
+  assert.equal(isValidSemver('0.21.0-beta.1'), true, '可带 - 后缀');
+  assert.equal(isValidSemver('0.21'), false, '缺 patch → 非法');
+  assert.equal(isValidSemver('0.21.0.1'), false, '多余段 → 非法');
+  assert.equal(isValidSemver('0.2a.0'), false, '非数字 → 非法');
+  assert.equal(isValidSemver(0), false, '非字符串 → 非法');
+  // minor bump:0.21.0 → 0.22.0。
+  assert.equal(bumpSemver('0.21.0', 'minor'), '0.22.0');
+  assert.equal(bumpSemver('0.21.0', 'patch'), '0.21.1');
+  assert.equal(bumpSemver('0.21.0', 'major'), '1.0.0');
+  assert.equal(bumpSemver('bad', 'minor'), null, '非法版本 → null');
+  // 大小比较。
+  assert.equal(gtSemver('0.22.0', '0.21.0'), true, 'targetVersion > currentVersion');
+  assert.equal(gtSemver('0.21.0', '0.21.0'), false, '相等 → 不向上');
+  assert.equal(gtSemver('0.21.0', '0.22.0'), false, '小于 → false');
+});
+
+test('validateDeliveryChecklist:完整清单通过(版本 bump + CHANGELOG 齐备)(AC3 happy path)', () => {
+  const checked = validateDeliveryChecklist({
+    packageName: 'dsh-preset-project-pipeline',
+    packageFile: 'presets/project-pipeline/package.json',
+    currentVersion: '0.21.0',
+    targetVersion: '0.22.0',
+    semverBump: 'minor',
+    changelogEntry: 'kr-accept-route 扩 deploy-restart 路由前置;build 交付检查单:版本 bump + CHANGELOG 强制',
+  });
+  assert.equal(checked.ok, true, '版本 bump + CHANGELOG 齐备 → 通过');
+  assert.deepEqual(checked.errors, []);
+});
+
+test('validateDeliveryChecklist:缺版本 bump / 缺 CHANGELOG / 其他非法 → 拒绝(AC3)', () => {
+  const base = {
+    packageName: 'dsh-preset-project-pipeline',
+    packageFile: 'presets/project-pipeline/package.json',
+    currentVersion: '0.21.0',
+    targetVersion: '0.22.0',
+    semverBump: 'minor',
+    changelogEntry: '条目文案',
+  };
+  // 缺 changelogEntry。
+  assert.equal(validateDeliveryChecklist({ ...base, changelogEntry: '' }).ok, false, 'changelogEntry 空 → 拒绝');
+  assert.equal(validateDeliveryChecklist({ ...base, changelogEntry: '   ' }).ok, false, 'changelogEntry 空白 → 拒绝');
+  // 缺版本 bump(非法 semver / 未递增)。
+  assert.equal(validateDeliveryChecklist({ ...base, currentVersion: 'oops' }).ok, false, 'currentVersion 非法 → 拒绝');
+  assert.equal(validateDeliveryChecklist({ ...base, targetVersion: 'oops' }).ok, false, 'targetVersion 非法 → 拒绝');
+  assert.equal(validateDeliveryChecklist({ ...base, targetVersion: '0.21.0' }).ok, false, 'targetVersion 未递增 → 拒绝');
+  // semverBump 非法。
+  assert.equal(validateDeliveryChecklist({ ...base, semverBump: 'bigbang' }).ok, false, 'semverBump 非法 → 拒绝');
+  // 必填字段缺。
+  assert.equal(validateDeliveryChecklist({ ...base, packageName: '' }).ok, false, 'packageName 空 → 拒绝');
+  assert.equal(validateDeliveryChecklist(null).ok, false, 'null → 拒绝');
+  assert.equal(validateDeliveryChecklist([]).ok, false, '非对象 → 拒绝');
+});
+
+test('buildDeliveryChecklist:从 currentVersion + semverBump 推导 targetVersion 并组装(AC4)', () => {
+  const built = buildDeliveryChecklist({
+    packageName: 'dsh-preset-project-pipeline',
+    packageFile: 'presets/project-pipeline/package.json',
+    currentVersion: '0.21.0',
+    semverBump: 'minor',
+    changelogEntry: 'kr-accept-route 扩 deploy-restart 路由前置;build 交付检查单:版本 bump + CHANGELOG 强制',
+  });
+  assert.equal(built.ok, true, '推导并校验通过');
+  assert.equal(built.checklist.targetVersion, '0.22.0', 'minor 推导 0.21.0 → 0.22.0');
+  assert.equal(built.checklist.semverBump, 'minor');
+  assert.equal(built.checklist.schemaVersion, 1);
+});
+
+test('buildDeliveryChecklist:缺 changelogEntry / 非法 currentVersion / 非法 semverBump → error(AC4)', () => {
+  assert.equal(buildDeliveryChecklist({ packageName: 'p', packageFile: 'f', currentVersion: '0.21.0', semverBump: 'minor', changelogEntry: '' }).ok, false, '缺 changelogEntry → error');
+  assert.equal(buildDeliveryChecklist({ packageName: 'p', packageFile: 'f', currentVersion: 'bad', semverBump: 'minor', changelogEntry: 'c' }).ok, false, 'currentVersion 非法 → error');
+  assert.equal(buildDeliveryChecklist({ packageName: 'p', packageFile: 'f', currentVersion: '0.21.0', semverBump: 'nope', changelogEntry: 'c' }).ok, false, 'semverBump 非法 → error');
 });
 
 // ── 门禁授权源校验(kr-gate-auth,0.20.0):validateRulingRef 纯函数 ──
