@@ -2411,7 +2411,7 @@ SPEC(clarify 阶段)必须含「可行性分析」章,五维逐条给结论(可�
 ### 批量沉淀机制(0.18.0,kr-sediment-batch)
 - **计数触发**:每 N 个项目交付(N 默认 10,workspace 级可调,并入 audit-rules.json meta 段 sedimentation.everyNDelivered,免部署生效)自动登记一个专门沉淀项目。
 - **开关(0.18.0 增补)**:audit-rules.json meta 段 sedimentation:{enabled:true, everyNDelivered:10}(默认值);enabled=false → 触发检测代码层短路,不产生登记指令;计数在关闭期间继续累计(从 REGISTRY 派生,不新增状态文件),重新开启后若 count>=N 下一次交付即触发。改配免部署生效。
-- **触发信号代码层浮现**:advance-to-delivered 返回值携带「已达沉淀阈值 N,须登记沉淀项目」指令(sediment.triggered=true,非 MANUAL_TEXT 手册纪律);第 N 个项目的协调者收到指令后登记沉淀项目(复用既有 advance 链路,不新增常驻进程)。
+- **触发信号代码层浮现**:advance-to-delivered 返回值携带「已达沉淀阈值 N,须登记沉淀项目」指令(sediment.triggered=true,非 MANUAL_TEXT 手册纪律);沉淀项目由 intake 登记面登记——协调者结算上抛指令,intake project_register(协调者工具面无 register 属能力事实,非缺陷;复用既有 advance 链路,不新增常驻进程)。
 - **防重复触发**:active/parked 已有沉淀项目不重登;并发交付只触发一次(登记沉淀项目后,后续 advance 因已有 active/parked 沉淀项目不再触发)。
 - **计数口径**:自最近一次沉淀项目登记以来 state=delivered 的项目数,从 REGISTRY 派生,不新增状态文件。
 - **沉淀项目识别口径(0.18.0 修订)**:按 **flowRef** 识别——flowRef 以 sediment-flow 开头即沉淀项目(自动沉淀项目经 register 指定 flowTemplate=sediment-flow 即携带 flowRef=sediment-flow@N);title 前缀「沉淀」仅保留为登记惯例,不作为判定依据。任何用户项目标题以「沉淀」开头(如「沉淀机制探针」)都不会被误判为沉淀项目、不构成锚点、计入普通交付(真机探针教训)。
@@ -2509,7 +2509,7 @@ export function apply(ctx, config = {}) {
 
   ctx.tools.register({
     name: 'project_advance',
-    description: '推进项目流程指针到下一阶段。门禁待裁决时拒绝;approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 指定的 work 阶段;在最后阶段给 appendStages 可开启新迭代。parked 项目只能经 activate:true 激活(parked→active,stageIndex=0)或 cancel:true 取消(parked→rejected,终态),否则一律拒绝;激活时对同 entity active 项目做互斥检测,命中 → 明确拒绝(不静默并行)。每次推进自动写 journal 并刷新 REGISTRY.updatedAt;可带 sessions:[{sessionId,role}] 登记 spawn 返回的 subagentId(主路会话捕获);推进时自动归集本项目私有会话真实 tokenUsage 写 committed(source=runtime-events),返回 collected 状态。**批量沉淀触发(0.18.0)**:结项(advance-to-delivered)时实时读 audit-rules.json meta 段 sedimentation:{enabled,everyNDelivered}(N),enabled=true 且满 N 且无 active/parked 沉淀项目 → 返回值携带「已达沉淀阈值 N,须登记沉淀项目」指令(sediment.triggered=true);enabled=false → 代码层短路不产生指令(计数继续累计)。协调者收到指令后登记沉淀项目(flowTemplate=sediment-flow,title 带「沉淀」前缀)。',
+    description: '推进项目流程指针到下一阶段。门禁待裁决时拒绝;approve 裁决后推进并清门禁态;revise 裁决跳回 reviseTo 指定的 work 阶段;在最后阶段给 appendStages 可开启新迭代。parked 项目只能经 activate:true 激活(parked→active,stageIndex=0)或 cancel:true 取消(parked→rejected,终态),否则一律拒绝;激活时对同 entity active 项目做互斥检测,命中 → 明确拒绝(不静默并行)。每次推进自动写 journal 并刷新 REGISTRY.updatedAt;可带 sessions:[{sessionId,role}] 登记 spawn 返回的 subagentId(主路会话捕获);推进时自动归集本项目私有会话真实 tokenUsage 写 committed(source=runtime-events),返回 collected 状态。**批量沉淀触发(0.18.0)**:结项(advance-to-delivered)时实时读 audit-rules.json meta 段 sedimentation:{enabled,everyNDelivered}(N),enabled=true 且满 N 且无 active/parked 沉淀项目 → 返回值携带「已达沉淀阈值 N,须登记沉淀项目」指令(sediment.triggered=true);enabled=false → 代码层短路不产生指令(计数继续累计)。沉淀项目由 intake 登记面登记(协调者结算上抛指令,intake project_register;协调者工具面无 register 属能力事实,非缺陷;flowTemplate=sediment-flow,title 带「沉淀」前缀)。',
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -2543,7 +2543,7 @@ export function apply(ctx, config = {}) {
     output: {
       schema: ADVANCE_OUTPUT_SCHEMA,
       render: (args, value) => [{ type: 'text', text: value.delivered
-        ? `项目 ${args.projectId} 已交付结项(state=delivered,第 ${value.iteration} 次迭代;最后阶段 ${value.stage.id})。后续推进会被拒绝;开新迭代请登记反馈后用 appendStages。${value.collected ? `归集:${value.collected.ok ? 'ok' : '跳过'}${value.collected.note ? `(${value.collected.note})` : ''}` : ''}${value.sediment?.triggered ? `\n⚠ ${value.sediment.message}(已达 ${value.sediment.count}/${value.sediment.threshold}):请登记沉淀项目(flowTemplate=sediment-flow,title 带「沉淀」前缀)。` : ''}`
+        ? `项目 ${args.projectId} 已交付结项(state=delivered,第 ${value.iteration} 次迭代;最后阶段 ${value.stage.id})。后续推进会被拒绝;开新迭代请登记反馈后用 appendStages。${value.collected ? `归集:${value.collected.ok ? 'ok' : '跳过'}${value.collected.note ? `(${value.collected.note})` : ''}` : ''}${value.sediment?.triggered ? `\n⚠ ${value.sediment.message}(已达 ${value.sediment.count}/${value.sediment.threshold}):请上抛 intake 由登记面登记沉淀项目(flowTemplate=sediment-flow,title 带「沉淀」前缀)。` : ''}`
         : value.activated
           ? `项目 ${args.projectId} 已激活(parked→active,state=active),从阶段 #${value.stageIndex + 1} ${value.stage?.id ?? ''}(${value.stage ? stageTypeLabel(value.stage.type) : ''})开始推进;请按 state=active spawn 协调者从 clarify 开始。`
           : value.cancelled
