@@ -1,3 +1,25 @@
+## [0.4.2] - 2026-09-07
+
+看板扫描接受 symlink/junction 项目目录(Windows junction 形态项目目录不可见修复;实测 2026-09-07:项目目录以 junction 形态挂进扫描根后,项目中心列表整体缺失)。
+
+- **root cause**:`scanProjects` 的 dirent 过滤仅认 `entry.isDirectory()`;Windows junction(NTFS 挂载点)在 `readdir(withFileTypes)` 的 dirent 里是 `isSymbolicLink()=true/isDirectory()=false` → 被过滤。
+- **修复**:过滤放宽为 `isDirectory() || isSymbolicLink()`(isSymbolicLink 防御式调用,兼容 Dirent-like stub);「是否真是项目目录」仍由既有 `stat(<项目>/.dsh-project)` 守门——悬空/非项目链接 stat 失败 → 跳过,单项目失败不拖垮整体(原语义不变)。
+- **测试**:新增回归「scanProjects:junction/symlink 项目目录可见」(symlink dirent 收录/悬空链接跳过/普通目录照常);全套件 **179 全绿**(project-hub.test.mjs 126 + client.test.mjs 53,PR 树形态实测;基线 178 + 1)。
+- 版本 0.4.1 → **0.4.2(patch)**。
+
+## [0.4.1] - 2026-09-06
+
+设置卡保存链路修复(真实环境复现:单环境默认部署下「每角色模型」保存必 400,用户报障「修改的模型保存不下来」)。版本 0.4.0 → **0.4.1(patch)**。
+
+- **复现(HTTP 400 实录)**:单环境默认部署(settings.yaml 无 `project-hub:` 节、web 进程未设 `DSH_HOME`)下,`PUT /plugins/project-hub/api {settings:{roleModel:{role:'dev',...}}}` → **400 `role manifest not found: dev`**;UI 弹「保存失败: role manifest not found: dev」。读侧 `view=settings` 不报错(来源降级 default),故仅保存路径暴露。
+- **根因**:`resolvePresetRolesDir` / `resolveProjcachePath` 只有 显式 config → env `DSH_HOME` 两级解析;作者环境显式设了 `DSH_HOME` 才可用,单环境默认部署两级皆空 → `presetRolesDir=null` → `writeRoleModel` 找不到 preset 角色声明即 400。
+- **修复(host)**:两 resolver 增第三级回退 `homedir()/.dsh`(与 dsh 单环境默认 dsh-home 一致,同 toolkit paths.mjs 的 DSH_HOME 默认)。返回目录不存在时读侧照旧降级 default、写侧维持 400 语义,行为无新增风险。
+- **修复(UI)**:
+  - 看板零项目空态显示**当前 scanRoot + 修改指引**(扫错根不再静默空白——本机 scanRoot 回退值与流水线工作区不一致时,看板此前直接空白且无解释);
+  - 设置卡「每角色模型」块显示**保存落点**(`<scanRoot>\.dsh-library\roles\<角色>.json`)与「须与流水线工作区一致」提示;
+  - 角色卡编辑态增**未保存徽章**:下拉改动不点「保存」即丢弃,此前无任何提示(用户实测踩坑:改完下拉直接关面板,重开还原);保存/恢复默认成功后同步 roles 快照防徽章误亮。
+- 测试:client 48 → **53**(isRoleDraftDirty 纯函数 3 例 + 警示 UI 静态核对 2 例),host 122 → **125**(resolver 第三级回退 2 例 + 通道级复现回归 1 例「无显式 config 经 env 解析 preset → 200」),合计 170 → **178 全绿**。
+- 触点:host-plugins/project-hub(project-hub.mjs resolver ×2 / ui/lib/client.js / test ×2)→ 部署需**重启 web 实例**;部署后建议把看板 scanRoot 显式配置到流水线工作区根(见 docs/BUGREP-2026-09-06-role-model-save-400.md)。
 ## [0.4.0] - 2026-09-06
 
 单环境默认部署(kr-single-env 交付):deploy.mjs 默认部署到单环境 dsh-home(~/.dsh/profiles/web);--env prod --confirm-prod 仅双环境显式开启(仓库根 .plugindev-env.json 或 DSH_ENV)下适用。版本 0.3.0 → **0.4.0(minor)**。

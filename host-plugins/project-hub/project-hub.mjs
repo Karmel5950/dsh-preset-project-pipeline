@@ -42,8 +42,19 @@
 //     (role='intake' 或 ≥2 项目登记),读 projcache 取 tokenUsage 全工作区计一次。
 //   - host 侧 projcache 定位与守卫与 preset 同规则:显式 config projcachePath 优先、
 //     env DSH_HOME 回退、unit.version=3 守卫(≠3 中文报错不误解析)。
+// 0.4.1 修复(本机复刻「设置卡保存角色模型必 400」后交付):
+//   - 复现:单环境默认部署(settings.yaml 无 project-hub 节、web 进程未设 DSH_HOME)下,
+//     PUT {settings:{roleModel}} → 400 "role manifest not found: dev";沉淀策略保存同理。
+//     根因:resolvePresetRolesDir/resolveProjcachePath 只有 config → env DSH_HOME 两级,
+//     作者环境显式设了 DSH_HOME 才可用,单环境默认部署两级皆空 → presetRolesDir=null。
+//   - 修复:两 resolver 增第三级回退 homedir()/.dsh(与 dsh 单环境默认 dsh-home 一致,
+//     同 toolkit paths.mjs 的 DSH_HOME 默认),无 env 时按标准安装位置解析 preset 角色与 projcache。
+//   - 前端:看板零项目空态显示当前 scanRoot + 修改指引(扫错根不再静默空白);设置卡
+//     每角色模型块显示保存落点与「须与流水线工作区一致」提示;角色卡编辑态增未保存徽章
+//     (下拉改动不点保存=丢弃,不再无提示)。
 import { readFile, readdir, stat, writeFile, rename, mkdir, copyFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import {
   channel,
   hotConfig,
@@ -411,7 +422,15 @@ export async function scanProjects(scanRoot, deps) {
   }
   const projects = [];
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+    // Windows junction(NTFS 挂载点)在 readdir(withFileTypes) 的 dirent 里是
+    // isSymbolicLink()=true / isDirectory()=false——只按 isDirectory 过滤会漏掉
+    // junction 形态的项目目录(实测 2026-09-07:项目登记后看板整体不可见)。
+    // symlink/junction 是否真是项目目录仍由下方 stat(.dsh-project) 守门:
+    // 悬空/非项目链接 stat 失败 → isDsh=false → 跳过,不拖垮整体。
+    // isSymbolicLink 防御式调用:兼容仅实现 isDirectory 的 Dirent-like stub。
+    const isDir = entry.isDirectory();
+    const isSym = typeof entry.isSymbolicLink === 'function' && entry.isSymbolicLink();
+    if (!isDir && !isSym) continue;
     const id = entry.name;
     const projectDir = join(scanRoot, id);
     const dshDir = join(projectDir, '.dsh-project');
@@ -1066,8 +1085,9 @@ export function resolveScanRoot(settingsService, deps) {
 }
 
 /**
- * 解析 projcache 路径(0.8.0):显式 config projcachePath 优先,env DSH_HOME 回退。
- * 都没有 → null(聚合时 sharedOnce 非致命跳过)。
+ * 解析 projcache 路径(0.8.0):显式 config projcachePath 优先,env DSH_HOME 回退,
+ * 0.4.1 再回退 homedir()/.dsh(单环境默认 dsh-home,进程未设 DSH_HOME 的标准部署)。
+ * 都没有(理论不可达)→ null(聚合时 sharedOnce 非致命跳过)。
  */
 export function resolveProjcachePath(settingsService) {
   const value = settingsService?.get?.(NAMESPACE);
@@ -1076,13 +1096,16 @@ export function resolveProjcachePath(settingsService) {
   }
   const home = process.env.DSH_HOME;
   if (typeof home === 'string' && home.length > 0) return join(home, 'storages', 'session_projcache.json');
-  return null;
+  return join(homedir(), '.dsh', 'storages', 'session_projcache.json');
 }
 
 /**
  * 解析 preset 角色目录(kr-control-plane):显式 config presetRolesDir 优先,
- * env DSH_HOME 回退到 .agent-presets/project-pipeline/roles/。都没有 → null
- * (来源展示降级为 default,不伪造)。
+ * env DSH_HOME 回退到 .agent-presets/project-pipeline/roles/;0.4.1 增第三级回退
+ * homedir()/.dsh/.agent-presets/project-pipeline/roles(单环境默认 dsh-home,进程未设
+ * DSH_HOME 的标准部署——此前该形态下 presetRolesDir=null,设置卡保存角色模型必 400
+ * "role manifest not found: <role>",本机复刻后修复)。返回值所指目录不存在时,
+ * 读侧 readJsonSafe 回退空 manifest(source=default,不伪造),写侧维持既有 400 语义。
  */
 export function resolvePresetRolesDir(settingsService) {
   const value = settingsService?.get?.(NAMESPACE);
@@ -1091,7 +1114,7 @@ export function resolvePresetRolesDir(settingsService) {
   }
   const home = process.env.DSH_HOME;
   if (typeof home === 'string' && home.length > 0) return join(home, '.agent-presets', 'project-pipeline', 'roles');
-  return null;
+  return join(homedir(), '.dsh', '.agent-presets', 'project-pipeline', 'roles');
 }
 
 /** 校验路径存在且为目录。 */

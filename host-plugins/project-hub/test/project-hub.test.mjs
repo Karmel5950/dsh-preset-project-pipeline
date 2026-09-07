@@ -250,6 +250,48 @@ test('scanProjects 返回全部项目,跳过非项目目录(AC-R1.1)', async () 
   assert.ok(!projects.some((p) => p.id === 'not-a-project'));
 });
 
+test('scanProjects:junction/symlink 项目目录可见(Windows junction dirent=isSymbolicLink,AC-R1.1)', async () => {
+  // 复现(2026-09-07):Windows junction 在 readdir(withFileTypes) 的 dirent 里是
+  // isDirectory()=false / isSymbolicLink()=true,旧过滤直接跳过 → junction 形态的
+  // 项目目录在看板整体不可见。修复后 symlink dirent 不再被过滤,是否真是项目
+  // 目录仍由 stat(.dsh-project) 守门(悬空链接 → 跳过)。
+  const jtree = {
+    ws: {
+      'proj-a': tree.ws['proj-a'],
+      'proj-junction': {
+        '.dsh-project': {
+          'REGISTRY.json': JSON.stringify({
+            schemaVersion: 1, id: 'proj-junction', title: 'Junction Proj', state: 'active',
+            iteration: 1, stageIndex: 0, gateStatus: null,
+          }),
+        },
+      },
+      // dangling-link 不在 tree 里:stat('.dsh-project') ENOENT → 应跳过
+    },
+  };
+  const base = makeStubDeps(jtree);
+  const deps = {
+    ...base,
+    async readdir(path, opts) {
+      if (String(path).replace(/\\/g, '/') === 'ws') {
+        return [
+          { name: 'proj-a', isDirectory: () => true, isSymbolicLink: () => false, isFile: () => false },
+          { name: 'proj-junction', isDirectory: () => false, isSymbolicLink: () => true, isFile: () => false },
+          { name: 'dangling-link', isDirectory: () => false, isSymbolicLink: () => true, isFile: () => false },
+        ];
+      }
+      return base.readdir(path, opts);
+    },
+  };
+  const projects = await scanProjects('ws', deps);
+  const ids = projects.map((p) => p.id).sort();
+  // junction 项目经 stat 穿透 → 收录;悬空链接被 stat 守门跳过;普通目录照常
+  assert.deepEqual(ids, ['proj-a', 'proj-junction']);
+  const j = projects.find((p) => p.id === 'proj-junction');
+  assert.equal(j.state, 'active');
+  assert.ok(!projects.some((p) => p.id === 'dangling-link'));
+});
+
 test('scanProjects 列表项含状态/迭代/当前阶段/待裁决门禁/预算摘要(AC-R1.1)', async () => {
   const projects = await scanProjects('ws', makeStubDeps(tree));
   const a = projects.find((p) => p.id === 'proj-a');
@@ -608,10 +650,10 @@ test('sessionTokenUsage:host 侧取单会话 tokenUsage(有效计费口径)', ()
 
 test('resolveProjcachePath:config projcachePath 优先,env DSH_HOME 回退', () => {
   assert.equal(resolveProjcachePath(makeSettingsService({ projcachePath: '/custom/pc.json' })), '/custom/pc.json');
-  // 无 config → env DSH_HOME 回退(测试环境可能无 DSH_HOME,只断言形状)。
+  // 0.4.1:env DSH_HOME → <home>/storages/session_projcache.json;都无 →
+  // homedir()/.dsh 兜底(第三级回退,不再返回 null)。两分支都含同款文件名。
   const v = resolveProjcachePath(makeSettingsService({}));
-  if (process.env.DSH_HOME) assert.ok(v && v.includes('session_projcache.json'));
-  else assert.equal(v, null);
+  assert.ok(v && v.includes('session_projcache.json'), `应有 projcache 路径兜底,实际:${v}`);
 });
 
 // ── 只读不写账本:AC-R4.3 ──────────────────────────────────────────────────
@@ -1825,4 +1867,68 @@ test('通道 PUT settings.roleModel reset:true:role 非已知角色 → 400(AC-A
   await handler(putReq({ settings: { roleModel: { role: 'ghost', reset: true } } }), res);
   assert.equal(lastStatus(res), 400);
   assert.match(lastJson(res).error, /unknown role: ghost/);
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 0.4.1 修复(本机复刻「设置卡保存角色模型必 400」):resolver 第三级回退
+// homedir()/.dsh(单环境默认 dsh-home)+ 通道级回归(无显式 config 时经 env 解析 preset)
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('resolvePresetRolesDir:无 config 无 env DSH_HOME → 回退 homedir()/.dsh/.agent-presets/project-pipeline/roles(0.4.1)', () => {
+  const prev = process.env.DSH_HOME;
+  delete process.env.DSH_HOME;
+  try {
+    const got = resolvePresetRolesDir(makeSettingsService());
+    assert.equal(typeof got, 'string', '单环境默认部署不得再返回 null(否则保存必 400)');
+    const norm = got.replaceAll('\\', '/');
+    assert.ok(norm.endsWith('.agent-presets/project-pipeline/roles'), `应落在标准安装位置,实际 ${norm}`);
+    assert.ok(norm.includes('.dsh'), `应指向 dsh-home,实际 ${norm}`);
+  } finally {
+    if (prev === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prev;
+  }
+});
+
+test('resolveProjcachePath:无 config 无 env DSH_HOME → 回退 homedir()/.dsh/storages/session_projcache.json(0.4.1 同型回退)', () => {
+  const prev = process.env.DSH_HOME;
+  delete process.env.DSH_HOME;
+  try {
+    const got = resolveProjcachePath(makeSettingsService());
+    assert.equal(typeof got, 'string', '单环境默认部署不得再返回 null');
+    const norm = got.replaceAll('\\', '/');
+    assert.ok(norm.endsWith('.dsh/storages/session_projcache.json'), `应落在 dsh-home storages,实际 ${norm}`);
+  } finally {
+    if (prev === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prev;
+  }
+});
+
+test('通道 PUT settings.roleModel:无显式 config,经 env DSH_HOME 回退解析 preset → 200(复现回归:旧代码此处 400 role manifest not found)', async () => {
+  const prev = process.env.DSH_HOME;
+  process.env.DSH_HOME = 'home';
+  try {
+    // settingsService 无 project-hub 节(get 返回 undefined)→ config 级解析落空,
+    // 走 env DSH_HOME 回退;stub fs 里 home/.agent-presets/project-pipeline/roles/dev.json 存在。
+    const tree = {
+      ws: {},
+      home: {
+        '.agent-presets': {
+          'project-pipeline': {
+            roles: { 'dev.json': JSON.stringify({ id: 'dev', summary: '写实现代码' }) },
+          },
+        },
+      },
+    };
+    const handler = makeApiHandler({ settingsService: makeSettingsService(), deps: makeStubDeps(tree), logger: { warn() {} } });
+    const res = stubRes();
+    await handler(putReq({ settings: { roleModel: { role: 'dev', provider: 'x', model: 'y' } } }), res);
+    assert.equal(lastStatus(res), 200, 'preset manifest 经回退解析后应保存成功');
+    const body = lastJson(res);
+    assert.equal(body.ok, true);
+    assert.equal(body.settings.roleModel.model.model, 'y');
+    // 覆盖写进 workspace 角色文件并带用户批准标记。
+    const written = JSON.parse(tree.ws['.dsh-library'].roles['dev.json']);
+    assert.deepEqual(written.model, { provider: 'x', model: 'y' });
+    assert.equal(written.modelApproval.by, 'user');
+  } finally {
+    if (prev === undefined) delete process.env.DSH_HOME; else process.env.DSH_HOME = prev;
+  }
 });
