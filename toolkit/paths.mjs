@@ -10,7 +10,20 @@ export const WORKSPACE_ROOT = fileURLToPath(new URL('../', import.meta.url));
 export const REPO_ROOT = resolve(WORKSPACE_ROOT, '..');
 export const RUNTIME_ROOT = resolve(REPO_ROOT, 'dsh-runtime');
 export const RUNTIME_NODE_MODULES = join(RUNTIME_ROOT, 'node_modules');
-export const SHIPPED_PRESETS = join(RUNTIME_NODE_MODULES, '@deepseek-ai', 'dsh', 'config', 'agent-presets');
+// npm 全局布局兼容:dsh 经 npm 安装(全局/本地 node_modules)时,不存在
+// <dsh-home>\dsh-runtime 平级布局——回退 %APPDATA%\npm\node_modules\@deepseek-ai\dsh;
+// 作者布局(<dsh-home>\dsh-runtime 存在)时零影响。
+function resolveDshPkgRoot() {
+  const runtimeCandidate = join(RUNTIME_NODE_MODULES, '@deepseek-ai', 'dsh');
+  if (existsSync(join(runtimeCandidate, 'package.json'))) return runtimeCandidate;
+  if (process.env.APPDATA) {
+    const npmGlobal = join(process.env.APPDATA, 'npm', 'node_modules', '@deepseek-ai', 'dsh');
+    if (existsSync(join(npmGlobal, 'package.json'))) return npmGlobal;
+  }
+  return runtimeCandidate;
+}
+export const DSH_PKG_ROOT = resolveDshPkgRoot();
+export const SHIPPED_PRESETS = join(DSH_PKG_ROOT, 'config', 'agent-presets');
 export const PRESETS_DIR = join(WORKSPACE_ROOT, 'presets');
 export const TRASH_DIR = join(REPO_ROOT, '.trash');
 
@@ -33,7 +46,7 @@ function computeApiBase() {
 //   此时 envSpec() 返回 test/prod 环境的目录与端口配置(test=plugindev/.dsh-home+3081,prod=~/.dsh+3080)。
 // 单环境可覆盖项:DSH_API(API 基址)/ DSH_HOME(单环境 dsh-home)。
 // 双环境显式开启项:DSH_ENV(显式开启并选当前环境)/ DSH_TEST_PORT(覆盖 test 端口,仅双环境下有意义)。
-export const DSH_BIN = join(RUNTIME_NODE_MODULES, '@deepseek-ai', 'dsh', 'lib', 'bin.js');
+export const DSH_BIN = join(DSH_PKG_ROOT, 'lib', 'bin.js');
 
 // 双环境显式开启下的 test 布局字段(单环境默认不适用)。
 export const TEST_DSH_HOME = join(WORKSPACE_ROOT, '.dsh-home');
@@ -130,14 +143,14 @@ export function envFromArgs(argv) {
 }
 
 export function runtimeImport(specifier) {
-  return import(pathToFileURL(join(RUNTIME_NODE_MODULES, ...specifier.split('/'))).href);
+  return import(pathToFileURL(join(dirname(DSH_PKG_ROOT), ...specifier.split('/'))).href);
 }
 
 export function runtimeDshVersion() {
-  const pkg = JSON.parse(readFileSync(join(RUNTIME_NODE_MODULES, '@deepseek-ai', 'dsh', 'package.json'), 'utf8'));
+  const pkg = JSON.parse(readFileSync(join(DSH_PKG_ROOT, 'package.json'), 'utf8'));
   return pkg.version;
 }
 
 export function runtimeReachable() {
-  return existsSync(join(RUNTIME_NODE_MODULES, '@deepseek-ai', 'dsh', 'package.json'));
+  return existsSync(join(DSH_PKG_ROOT, 'package.json'));
 }

@@ -1,3 +1,12 @@
+## [0.23.1] - 2026-09-07
+
+toolkit npm 全局布局兼容(dsh 经 npm 安装时 toolkit 生命周期工具整体不可用修复;实测 2026-09-07:deploy.mjs 直接 ENOENT 崩溃)。
+
+- **root cause**:toolkit/paths.mjs 把 dsh 运行时包根硬编码为 `resolve(REPO_ROOT, 'dsh-runtime')`(作者布局:dsh-runtime 与 plugindev 平级);npm 全局安装(标准形态,`%APPDATA%\npm\node_modules\@deepseek-ai\dsh`)下该路径不存在,runtimeDshVersion/runtimeReachable/DSH_BIN/runtimeImport 全部落空 → deploy.mjs ENOENT 崩溃。
+- **修复**:新增 `DSH_PKG_ROOT = resolveDshPkgRoot()`(`<dsh-home>\dsh-runtime` 布局优先,npm 全局回退,作者布局零影响);SHIPPED_PRESETS/DSH_BIN/runtimeImport/runtimeDshVersion/runtimeReachable 全部改经 DSH_PKG_ROOT;test/prompt-render.test.mjs 的 dsh-system-prompt 探测加同款回退。
+- **测试**:toolkit single-env 10 全绿(PR 版 paths 实测);prompt-render 回退路径在本机 npm 全局布局实测命中。
+- 版本 0.23.0 → **0.23.1(patch)**。
+
 ## [0.23.0] - 2026-09-06
 
 单环境默认——去除 prod/test 双环境硬编码假设(kr-single-env 交付;背景:用户原话「其他人不一定有 prod 和 test 的环境区分这个要改,默认只有一套环境」)。注:原 APPLY 拟 0.22.0 与 kr-deploy-route-bump 撞号,顺延 0.23.0。

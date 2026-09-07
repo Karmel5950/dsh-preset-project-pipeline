@@ -24,7 +24,13 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 // 不硬编码层级:从本目录向上探测含 dsh-runtime 的祖先,生产与自测两种布局通用(交付已三次带回硬编码版)。
 let runtimeProbe = HERE;
 for (let i = 0; i < 12 && !existsSync(join(runtimeProbe, 'dsh-runtime', 'node_modules', '@deepseek-ai', 'dsh-system-prompt')); i++) runtimeProbe = dirname(runtimeProbe);
-const RUNTIME_ROOT = join(runtimeProbe, 'dsh-runtime');
+let RUNTIME_ROOT = join(runtimeProbe, 'dsh-runtime');
+// npm 全局布局兼容:祖先探测找不到 dsh-runtime 时,回退 %APPDATA%\npm\node_modules\@deepseek-ai\dsh
+// 内嵌的 node_modules;祖先探测命中(作者/自测布局)时零影响。
+if (!existsSync(join(RUNTIME_ROOT, 'node_modules', '@deepseek-ai', 'dsh-system-prompt')) && process.env.APPDATA) {
+  const npmDshPkg = join(process.env.APPDATA, 'npm', 'node_modules', '@deepseek-ai', 'dsh');
+  if (existsSync(join(npmDshPkg, 'node_modules', '@deepseek-ai', 'dsh-system-prompt', 'lib', 'index.js'))) RUNTIME_ROOT = npmDshPkg;
+}
 
 /** 事故样本:{{base}} 字面量(0.10.0 那次事故的形态)。 */
 const INCIDENT_SAMPLE = '- 每维先「查底座 + lessons-index 再下结论」:读 {{base}}/.dsh-library/lessons-index.json 与 {{base}}/.dsh-library/rulings.json。';
