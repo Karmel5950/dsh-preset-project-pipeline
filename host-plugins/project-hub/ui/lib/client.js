@@ -311,6 +311,11 @@ window.__ModuleLoader__.load({
 			"settings.modelsUnavailable": "模型清单不可用",
 			"settings.noModels": "暂无已配置模型,请先在 dsh 设置中配置。",
 			"settings.notInList": "不在清单",
+			// ── 0.4.1 新增键:保存落点提示 / 未保存徽章 / 零项目 scanRoot 警示 ──
+			"settings.saveLocationHint": "保存落点:{root}\\.dsh-library\\roles\\<角色>.json。该根须与流水线工作区一致,否则流水线角色读不到此覆盖。",
+			"settings.unsaved": "未保存:改动须点「保存」才落盘,直接关闭面板会丢弃。",
+			"empty.scanRootLabel": "当前扫描根目录:",
+			"empty.scanRootHint": "扫描根目录下未发现任何项目。若流水线项目登记在其他工作区,请到 设置 → 插件 → 插件配置 → project-hub「扫描根目录」改为项目所在目录,保存后重开看板。",
 		};
 		const en = {
 			"title": "Project Hub",
@@ -523,6 +528,10 @@ window.__ModuleLoader__.load({
 			"settings.modelsUnavailable": "Model list unavailable",
 			"settings.noModels": "No configured models; configure them in dsh settings first.",
 			"settings.notInList": "not in list",
+			"settings.saveLocationHint": "Save location: {root}\\.dsh-library\\roles\\<role>.json. This root must match the pipeline workspace, otherwise the pipeline will not see the override.",
+			"settings.unsaved": "Unsaved: click \"Save\" to persist; closing the panel discards changes.",
+			"empty.scanRootLabel": "Current scan root:",
+			"empty.scanRootHint": "No projects found under the scan root. If your pipeline projects live in another workspace, set it in Settings → Plugins → project-hub \"Scan root\", save, then reopen the board.",
 		};
 
 		const inject = ["slots", "locale", "connection"];
@@ -633,6 +642,15 @@ window.__ModuleLoader__.load({
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({ settings: { roleModel: { role, reset: true } } }),
 			}).then((r) => r.json()).catch(() => ({ ok: false }));
+		}
+		// 0.4.1:角色卡未保存判定(纯函数,Node 可测)。draft 与服务端已存状态不一致 → true。
+		// saved 为 settings.roles 条目(provider/model 可能为 null);draft 为角色卡草稿(字符串)。
+		function isRoleDraftDirty(saved, draft) {
+			const sp = saved && typeof saved === "object" && typeof saved.provider === "string" ? saved.provider : "";
+			const sm = saved && typeof saved === "object" && typeof saved.model === "string" ? saved.model : "";
+			const dp = draft && typeof draft === "object" && typeof draft.provider === "string" ? draft.provider : "";
+			const dm = draft && typeof draft === "object" && typeof draft.model === "string" ? draft.model : "";
+			return dp !== sp || dm !== sm;
 		}
 
 		// ── 展示辅助 ─────────────────────────────────────────────────────────
@@ -1116,6 +1134,9 @@ window.__ModuleLoader__.load({
 			".dshph_stateTitle{font-size:15px;font-weight:600;color:var(--dshph-ink);margin:0}",
 			".dshph_stateHint{font-size:13px;color:var(--dshph-ink3);margin:0}",
 			".dshph_emptyBox{margin-top:28px;border:1px dashed var(--dshph-line2);border-radius:4px;padding:48px 24px;text-align:center;background:var(--dshph-card)}",
+			".dshph_scanRootWarn{margin:16px auto 0;max-width:560px;text-align:left;border:1px solid var(--dshph-warn-line);background:var(--dshph-warn-bg);border-radius:4px;padding:10px 14px;display:flex;flex-direction:column;gap:4px}",
+			".dshph_scanRootPath{margin:0;font-size:13px;color:var(--dshph-warn);word-break:break-all}",
+			".dshph_scanRootHint{margin:0;font-size:13px;color:var(--dshph-ink2);line-height:1.5}",
 			".dshph_emptyIcon{width:40px;height:40px;margin:0 auto 16px;border:1.5px solid var(--dshph-edge);border-radius:50%;position:relative}",
 			".dshph_emptyIcon::after{content:\"\";position:absolute;left:7px;right:7px;top:50%;height:1.5px;background:var(--dshph-edge);transform:rotate(-45deg)}",
 			".dshph_emptyMain{font-size:15px;font-weight:600;color:var(--dshph-ink);letter-spacing:.06em;margin:0}",
@@ -1762,11 +1783,15 @@ window.__ModuleLoader__.load({
 				React.createElement("p", { className: "dshph_stateText" }, t("loading")));
 		}
 
-		function EmptyState({ t }) {
+		// 0.4.1:零项目空态带 scanRoot 警示(扫错根不再静默空白;给出修改指引)。
+		function EmptyState({ t, scanRoot }) {
 			return React.createElement("div", { className: "dshph_emptyBox" },
 				React.createElement("div", { className: "dshph_emptyIcon", "aria-hidden": true }),
 				React.createElement("p", { className: "dshph_emptyMain" }, t("empty")),
-				React.createElement("p", { className: "dshph_emptySub" }, t("emptyHint")));
+				React.createElement("p", { className: "dshph_emptySub" }, t("emptyHint")),
+				typeof scanRoot === "string" && scanRoot.length > 0 ? React.createElement("div", { className: "dshph_scanRootWarn" },
+					React.createElement("p", { className: "dshph_scanRootPath" }, lookup(t, "empty.scanRootLabel", "") + " " + scanRoot),
+					React.createElement("p", { className: "dshph_scanRootHint" }, lookup(t, "empty.scanRootHint", ""))) : null);
 		}
 
 		// 迭代8:搜索+筛选后无匹配项目的空态(区别于「扫描根下暂无项目」全局空态)。
@@ -1820,6 +1845,8 @@ window.__ModuleLoader__.load({
 			const [revealArchived, setRevealArchived] = React.useState(false);
 			const [boardView, setBoardView] = React.useState({ items: {} });
 			const [writeFailed, setWriteFailed] = React.useState(false);
+			// 0.4.1:当前 scanRoot(零项目空态警示用;随主刷新一并拉取)。
+			const [scanRoot, setScanRoot] = React.useState(null);
 			// boardViewRef 始终持最新 boardView,避免乐观更新闭包读到过期值。
 			const boardViewRef = React.useRef(boardView);
 			boardViewRef.current = boardView;
@@ -1834,10 +1861,11 @@ window.__ModuleLoader__.load({
 						setRefreshFailed(false);
 					}).catch(() => setRefreshFailed(true));
 				} else {
-					Promise.all([fetchProjects(), fetchBudget(), fetchBoardView()]).then(([projs, bud, bv]) => {
+					Promise.all([fetchProjects(), fetchBudget(), fetchBoardView(), fetchConfig()]).then(([projs, bud, bv, cfg]) => {
 						setProjects(projs);
 						setBudget(bud);
 						setBoardView(bv);
+						if (cfg && typeof cfg.scanRoot === "string") setScanRoot(cfg.scanRoot);
 						setRefreshFailed(false);
 					}).catch(() => setRefreshFailed(true));
 				}
@@ -1847,11 +1875,12 @@ window.__ModuleLoader__.load({
 				if (!open) return;
 				let cancelled = false;
 				setFailed(false);
-				Promise.all([fetchProjects(), fetchBudget(), fetchBoardView()]).then(([projs, bud, bv]) => {
+				Promise.all([fetchProjects(), fetchBudget(), fetchBoardView(), fetchConfig()]).then(([projs, bud, bv, cfg]) => {
 					if (cancelled) return;
 					setProjects(projs);
 					setBudget(bud);
 					setBoardView(bv);
+					if (cfg && typeof cfg.scanRoot === "string") setScanRoot(cfg.scanRoot);
 				}).catch(() => {
 					if (!cancelled) setFailed(true);
 				});
@@ -1988,7 +2017,7 @@ window.__ModuleLoader__.load({
 									React.createElement("div", { className: "dshph_wsSub" },
 										`${t("bySource")}: ${sourceCountsText(ws.bySource, t)}${ws.sharedOnce ? ` · ${t("sharedOnce")}: ${ws.sharedOnce}` : ""}`))) : null,
 							projects === null ? React.createElement(LoadingState, { t })
-								: projects.length === 0 ? React.createElement(EmptyState, { t })
+								: projects.length === 0 ? React.createElement(EmptyState, { t, scanRoot })
 								: React.createElement(React.Fragment, null,
 									toolbar,
 									writeFailed ? React.createElement("p", { className: "dshph_errorLine" }, t("writeFailed")) : null,
@@ -2227,6 +2256,8 @@ window.__ModuleLoader__.load({
 			".dshph_roleCur b{color:var(--dshph-ink);font-weight:600}",
 			".dshph_roleEdit{margin-top:10px;border-top:1px solid var(--dshph-line);padding-top:10px;display:flex;flex-direction:column;gap:8px}",
 			".dshph_roleWarn{font-size:13px;color:var(--dshph-warn);background:var(--dshph-warn-bg);border:1px solid var(--dshph-warn-line);border-radius:4px;padding:6px 10px;margin:0}",
+			".dshph_roleUnsaved{font-size:13px;color:var(--dshph-warn);margin:0}",
+			".dshph_saveLocation{font-size:13px;color:var(--dshph-ink3);margin:0;line-height:1.5}",
 			".dshph_roleActions{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}",
 			".dshph_settingsSource{display:inline-block;font-size:13px;padding:2px 8px;border-radius:3px;border:1px solid var(--dshph-line2);color:var(--dshph-ink3)}",
 			".dshph_settingsSource[data-source=\"workspace\"]{color:var(--dshph-accent);border-color:var(--dshph-accent)}",
@@ -2261,16 +2292,19 @@ window.__ModuleLoader__.load({
 			const [busy, setBusy] = React.useState(false);
 			const [saveMsg, setSaveMsg] = React.useState(null); // { kind: 'ok'|'error', text }
 			const [editingRole, setEditingRole] = React.useState(null);
+			// 0.4.1:scanRoot(保存落点提示用)。
+			const [scanRoot, setScanRoot] = React.useState(null);
 
 			React.useEffect(() => {
 				let cancelled = false;
-				Promise.all([fetchSettings(), fetchModels()]).then(([s, m]) => {
+				Promise.all([fetchSettings(), fetchModels(), fetchConfig()]).then(([s, m, cfg]) => {
 					if (cancelled) return;
 					if (!s) { setFailed(true); return; }
 					setSettings(s);
 					setAuditDraft(JSON.parse(JSON.stringify(s.auditRules)));
           setRoleDrafts((s.roles || []).map((r) => ({ role: r.role, provider: typeof r.provider === "string" ? r.provider : (r.model && r.model.provider ? r.model.provider : ""), model: typeof r.model === "string" ? r.model : (r.model && r.model.model ? r.model.model : ""), source: r.source })));
 					setModels(m); // null=模型清单不可用;数组=可用(可能为空)
+					if (cfg && typeof cfg.scanRoot === "string") setScanRoot(cfg.scanRoot);
 				}).catch(() => { if (!cancelled) setFailed(true); });
 				return () => { cancelled = true; };
 			}, []);
@@ -2308,6 +2342,8 @@ window.__ModuleLoader__.load({
 				writeRoleModel(role, draft.provider, draft.model).then((res) => {
 					if (res && res.ok) {
 						setRoleDrafts((prev) => prev.map((r) => r.role === role ? Object.assign({}, r, { provider: res.settings.roleModel.model.provider, model: res.settings.roleModel.model.model, source: "workspace" }) : r));
+						// 0.4.1:同步 settings.roles 快照,避免未保存徽章在保存成功后因快照过期而误亮。
+						setSettings((prev) => prev ? Object.assign({}, prev, { roles: (prev.roles || []).map((s) => s && s.role === role ? Object.assign({}, s, { provider: res.settings.roleModel.model.provider, model: res.settings.roleModel.model.model, source: "workspace" }) : s) }) : prev);
 						setEditingRole(null);
 						setSaveMsg({ kind: "ok", text: t("settings.saved") });
 					} else setSaveMsg({ kind: "error", text: t("settings.saveFailed") + (res && res.error ? " " + res.error : "") });
@@ -2329,6 +2365,8 @@ window.__ModuleLoader__.load({
 							const provider = rm.model && rm.model.provider ? rm.model.provider : "";
 							const model = rm.model && rm.model.model ? rm.model.model : "";
 							setRoleDrafts((prev) => prev.map((r) => r.role === role ? Object.assign({}, r, { provider, model, source: rm.source || "default" }) : r));
+							// 0.4.1:同步 settings.roles 快照(与 saveRole 同理,防徽章误亮)。
+							setSettings((prev) => prev ? Object.assign({}, prev, { roles: (prev.roles || []).map((s) => s && s.role === role ? Object.assign({}, s, { provider, model, source: rm.source || "default" }) : s) }) : prev);
 							setEditingRole(null);
 							setSaveMsg({ kind: "ok", text: t("settings.saved") });
 						} else setSaveMsg({ kind: "error", text: t("settings.saveFailed") + (res && res.error ? " " + res.error : "") });
@@ -2375,6 +2413,9 @@ window.__ModuleLoader__.load({
 			const roleCards = roleDrafts.map((r) => {
 				const isDefault = r.source === "default";
 				const editing = editingRole === r.role;
+				// 0.4.1:未保存徽章(编辑态下草稿与服务端已存状态不一致时提示;纯函数判定)。
+				const savedRole = (settings.roles || []).find((s) => s && s.role === r.role) ?? null;
+				const dirty = editing && isRoleDraftDirty(savedRole, r);
 				return React.createElement("div", { key: r.role, className: "dshph_roleCard" },
 					React.createElement("div", { className: "dshph_roleHead" },
 						React.createElement("span", { className: "dshph_roleName" }, mapRole(r.role, t)),
@@ -2392,6 +2433,7 @@ window.__ModuleLoader__.load({
 									: React.createElement("span", { className: "dshph_settingsHint" }, t("settings.noModels"))),
 						),
 						React.createElement("p", { className: "dshph_roleWarn" }, t("settings.modelWarn")),
+						dirty ? React.createElement("p", { className: "dshph_roleUnsaved" }, lookup(t, "settings.unsaved", "")) : null,
 						React.createElement("div", { className: "dshph_roleActions" },
 							React.createElement("button", { type: "button", className: "dshph_settingsBtn dshph_settingsBtnPrimary", disabled: busy, onClick: () => saveRole(r.role) }, busy ? t("settings.saving") : t("settings.save")),
 							React.createElement("button", { type: "button", className: "dshph_settingsBtn", onClick: () => setEditingRole(null) }, t("settings.cancel")),
@@ -2405,6 +2447,7 @@ window.__ModuleLoader__.load({
 			});
 			const block2 = React.createElement("section", { className: "dshph_settingsBlock", "aria-label": t("settings.nav.roles") },
 				React.createElement("h3", { className: "dshph_settingsBlockTitle" }, t("settings.nav.roles")),
+				scanRoot ? React.createElement("p", { className: "dshph_saveLocation" }, lookup(t, "settings.saveLocationHint", "").replace("{root}", scanRoot)) : null,
 				roleCards,
 			);
 
