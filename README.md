@@ -91,8 +91,34 @@ node toolkit/pipeline-watch.mjs --session <会话id> --ws-root <流水线工作�
 
 ```bash
 cd presets/project-pipeline && node --test test/    # 292 项
-cd host-plugins/project-hub && node --test test/    # 170 项
+cd host-plugins/project-hub && node --test test/    # 178 项
 ```
+
+## 常见问题
+
+### OpenCode Go 渠道报 400 `MissingSessionID`
+
+现象:选择 OpenCode Go 渠道模型(`opencode.ai/zen/go/v1` 或经其聚合的 provider)后,对话失败并返回
+`400 {"type":"MissingSessionID","message":"Error from provider (Console Go): Request is missing x-opencode-session ..."}`。
+
+原因:OpenCode Go 要求客户端在每个会话的请求头里携带稳定的 `x-opencode-session`(用于路由与提示缓存优化);
+dsh 当前版本在部分模型路径上未发送该头(上游在 opencode Discussion #5495 跟踪)。
+
+解决(改 `settings.yaml` 中对应 provider,保存即热生效,无需重启):
+
+```yaml
+llm-pi-ai:
+  providers:
+    your-opencode-provider:
+      apiKeyEnv: YOUR_KEY_ENV
+      api: openai-completions
+      baseURL: https://opencode.ai/zen/go/v1
+      headers: { x-opencode-session: dsh-7f0a2c64-9e31-4b8d-a5f1-2c6d84e7b910 }
+      models: [ { id: your-model, contextWindow: 500000 } ]
+```
+
+说明:headers 值用一个固定 ID 即可(生成一次,长期不变);这是 provider 级静态头,能满足渠道校验,
+但路由/缓存优化粒度是 provider 级而非会话级。详见 [OpenCode Go 文档](https://opencode.ai/docs/go/#where-can-i-use-it)。
 
 ## 文档
 
