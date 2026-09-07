@@ -608,10 +608,10 @@ test('sessionTokenUsage:host 侧取单会话 tokenUsage(有效计费口径)', ()
 
 test('resolveProjcachePath:config projcachePath 优先,env DSH_HOME 回退', () => {
   assert.equal(resolveProjcachePath(makeSettingsService({ projcachePath: '/custom/pc.json' })), '/custom/pc.json');
-  // 无 config → env DSH_HOME 回退(测试环境可能无 DSH_HOME,只断言形状)。
+  // 0.4.1:env DSH_HOME → <home>/storages/session_projcache.json;都无 →
+  // homedir()/.dsh 兜底(第三级回退,不再返回 null)。两分支都含同款文件名。
   const v = resolveProjcachePath(makeSettingsService({}));
-  if (process.env.DSH_HOME) assert.ok(v && v.includes('session_projcache.json'));
-  else assert.equal(v, null);
+  assert.ok(v && v.includes('session_projcache.json'), `应有 projcache 路径兜底,实际:${v}`);
 });
 
 // ── 只读不写账本:AC-R4.3 ──────────────────────────────────────────────────
