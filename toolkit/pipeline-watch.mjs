@@ -59,8 +59,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { spawn as cpSpawn } from 'node:child_process';
+import { API_BASE } from './paths.mjs';
 
-const DEFAULT_API = 'http://127.0.0.1:3081';
+const DEFAULT_API = API_BASE;
 const DEFAULT_TIMEOUT_MIN = 40;
 const DEFAULT_LOG = 'pipeline-watch.log';
 const WS_RECONNECT_MS = 5000;

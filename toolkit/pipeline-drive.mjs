@@ -19,8 +19,9 @@
 //   0  成功(HTTP 2xx 且信封 ok)。
 //   1  失败(参数错误 / 连接失败 / HTTP 非 2xx / 信封非 ok)。
 import fs from 'node:fs';
+import { API_BASE } from './paths.mjs';
 
-const DEFAULT_API = 'http://127.0.0.1:3081';
+const DEFAULT_API = API_BASE;
 const DEFAULT_TIMEOUT_MS = 15000;
 
 function usage() {

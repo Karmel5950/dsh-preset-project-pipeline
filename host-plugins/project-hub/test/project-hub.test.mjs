@@ -250,6 +250,48 @@ test('scanProjects 返回全部项目,跳过非项目目录(AC-R1.1)', async () 
   assert.ok(!projects.some((p) => p.id === 'not-a-project'));
 });
 
+test('scanProjects:junction/symlink 项目目录可见(Windows junction dirent=isSymbolicLink,AC-R1.1)', async () => {
+  // 复现(2026-09-07):Windows junction 在 readdir(withFileTypes) 的 dirent 里是
+  // isDirectory()=false / isSymbolicLink()=true,旧过滤直接跳过 → junction 形态的
+  // 项目目录在看板整体不可见。修复后 symlink dirent 不再被过滤,是否真是项目
+  // 目录仍由 stat(.dsh-project) 守门(悬空链接 → 跳过)。
+  const jtree = {
+    ws: {
+      'proj-a': tree.ws['proj-a'],
+      'proj-junction': {
+        '.dsh-project': {
+          'REGISTRY.json': JSON.stringify({
+            schemaVersion: 1, id: 'proj-junction', title: 'Junction Proj', state: 'active',
+            iteration: 1, stageIndex: 0, gateStatus: null,
+          }),
+        },
+      },
+      // dangling-link 不在 tree 里:stat('.dsh-project') ENOENT → 应跳过
+    },
+  };
+  const base = makeStubDeps(jtree);
+  const deps = {
+    ...base,
+    async readdir(path, opts) {
+      if (String(path).replace(/\\/g, '/') === 'ws') {
+        return [
+          { name: 'proj-a', isDirectory: () => true, isSymbolicLink: () => false, isFile: () => false },
+          { name: 'proj-junction', isDirectory: () => false, isSymbolicLink: () => true, isFile: () => false },
+          { name: 'dangling-link', isDirectory: () => false, isSymbolicLink: () => true, isFile: () => false },
+        ];
+      }
+      return base.readdir(path, opts);
+    },
+  };
+  const projects = await scanProjects('ws', deps);
+  const ids = projects.map((p) => p.id).sort();
+  // junction 项目经 stat 穿透 → 收录;悬空链接被 stat 守门跳过;普通目录照常
+  assert.deepEqual(ids, ['proj-a', 'proj-junction']);
+  const j = projects.find((p) => p.id === 'proj-junction');
+  assert.equal(j.state, 'active');
+  assert.ok(!projects.some((p) => p.id === 'dangling-link'));
+});
+
 test('scanProjects 列表项含状态/迭代/当前阶段/待裁决门禁/预算摘要(AC-R1.1)', async () => {
   const projects = await scanProjects('ws', makeStubDeps(tree));
   const a = projects.find((p) => p.id === 'proj-a');

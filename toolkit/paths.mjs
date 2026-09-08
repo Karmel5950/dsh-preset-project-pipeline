@@ -143,7 +143,10 @@ export function envFromArgs(argv) {
 }
 
 export function runtimeImport(specifier) {
-  return import(pathToFileURL(join(dirname(DSH_PKG_ROOT), ...specifier.split('/'))).href);
+  // specifier 相对 node_modules 根(形如 "@deepseek-ai/<pkg>/lib/index.js")。
+  // DSH_PKG_ROOT = <node_modules>/@deepseek-ai/dsh,上两级才是 node_modules 根;
+  // 若用 dirname(DSH_PKG_ROOT)(scope 目录)会拼出 @deepseek-ai/@deepseek-ai/ 重复段。
+  return import(pathToFileURL(join(DSH_PKG_ROOT, '..', '..', ...specifier.split('/'))).href);
 }
 
 export function runtimeDshVersion() {

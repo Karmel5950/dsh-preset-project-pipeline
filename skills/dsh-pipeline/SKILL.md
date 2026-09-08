@@ -94,12 +94,12 @@ rulingRef:<裁决书落盘路径(feedback/ 下)>
 ## 6. 版本与同步仪式(交付收口时)
 
 - tag:`git tag plugindev/project-pipeline/vX.Y.Z <commit>`
-- 同步仓库(其他设备拉取):
+- 同步 GitHub(github.com/Karmel5950/dsh-preset-project-pipeline,**完整项目交付**:presets/project-pipeline + host-plugins/project-hub + toolkit + skills/dsh-pipeline + 根 README):
   ```bash
-  git subtree split -P plugindev/presets/project-pipeline -b preset-dist
-  git push preset-sync preset-dist:main && git branch -D preset-dist
+  # 暂存克隆(.trash/gh-staging-*)→ 覆盖四类物料 → commit → push(均带代理 http://127.0.0.1:10808)
+  # ⚠ 根 README.md 是对外交付版(deploy-guide 六步定稿),不得用本地 monorepo README 覆盖
   ```
-- 纯 host-plugin 修复(不动 preset 文件)无需 bump preset 版本与 subtree 推送
+- 纯 host-plugin 修复无需动 preset 版本;交付物常缺版本 bump/CHANGELOG(主线程代补并记失败模式)
 
 ## 7. 浏览器验收(视觉类 blocking,用 browser-use 技能)
 
@@ -112,7 +112,7 @@ rulingRef:<裁决书落盘路径(feedback/ 下)>
 
 ## 8. 已知坑(勿重蹈)
 
-- deploy STALE 假失败(§5.6);watcher 基线竞态(§2.2);提问帧堵队列(§4)
+- deploy STALE 假失败(§5.6);watcher 基线竞态(§2.2);提问帧堵队列(§4);**重启后必须行为探针验证**(新端点/role_show/spawn),HTTP 200 是老进程也会回的——kr-single-env 期间两次假重启致 0.20.0 未生效数小时
 - 旧子代理工具面冻结于 spawn 时刻:改白名单后须重 spawn,resume 不生效
 - REGISTRY blockers 无 state 字段;APPLY.md 可能在项目根而非 deliverables/
 - tester"自测全过"可能跑的是自带 _selftest 而非仓库测试——应用后必跑仓库全量

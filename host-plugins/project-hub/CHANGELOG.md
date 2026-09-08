@@ -1,3 +1,12 @@
+## [0.4.2] - 2026-09-07
+
+看板扫描接受 symlink/junction 项目目录(Windows junction 形态项目目录不可见修复;实测 2026-09-07:项目目录以 junction 形态挂进扫描根后,项目中心列表整体缺失)。
+
+- **root cause**:`scanProjects` 的 dirent 过滤仅认 `entry.isDirectory()`;Windows junction(NTFS 挂载点)在 `readdir(withFileTypes)` 的 dirent 里是 `isSymbolicLink()=true/isDirectory()=false` → 被过滤。
+- **修复**:过滤放宽为 `isDirectory() || isSymbolicLink()`(isSymbolicLink 防御式调用,兼容 Dirent-like stub);「是否真是项目目录」仍由既有 `stat(<项目>/.dsh-project)` 守门——悬空/非项目链接 stat 失败 → 跳过,单项目失败不拖垮整体(原语义不变)。
+- **测试**:新增回归「scanProjects:junction/symlink 项目目录可见」(symlink dirent 收录/悬空链接跳过/普通目录照常)。
+- 版本 0.4.1 → **0.4.2(patch)**。
+
 ## [0.4.1] - 2026-09-06
 
 设置卡保存链路修复(真实环境复现:单环境默认部署下「每角色模型」保存必 400,用户报障「修改的模型保存不下来」)。版本 0.4.0 → **0.4.1(patch)**。

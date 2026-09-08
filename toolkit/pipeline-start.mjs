@@ -4,9 +4,12 @@
 //   每个新登记项目都经本脚本创建其**专属** intake 会话,再由该新会话自行 project_register 入册。
 //
 // 职责(收窄,勿扩张):
-//   ① session.create(agentPreset:'project-pipeline', cwd:pipeline-ws) → 得新会话 id;
-//   ② 把登记投递文件 session.prompt 进该新会话(该会话的 intake 将读到登记请求并 register);
-//   ③ 打印 { sessionId, prompt, tip }。**不**负责 register、**不**写 REGISTRY(schema 权威在登记簿)。
+//   ① workspace.create({ path: pipeline-ws })(幂等:同 canonical path 返回既有实体,不重复建)
+//      → 得 workspaceId;
+//   ② session.create(workspaceId, agentPreset:'project-pipeline') → 自动 attach 到
+//      pipeline-ws 工作区组(官方同款路径,修复 intake 会话显示 Ungrouped),得新会话 id;
+//   ③ 把登记投递文件 session.prompt 进该新会话(该会话的 intake 将读到登记请求并 register);
+//   ④ 打印 { sessionId, prompt, tip }。**不**负责 register、**不**写 REGISTRY(schema 权威在登记簿)。
 //   intake 归属**永远以 REGISTRY.sessions[role==='intake'] 为权威**,打印值仅供 drive/watch 备忘。
 //
 // C2 红线(环境隔离,勿删):本脚本**每一个** dsh-api 调用都必须显式传 `baseUrl`——
@@ -22,13 +25,14 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { call } from './dsh-api.mjs'; // 复用 RPC 信封;但 baseUrl 一律显式传(C2)
+import { API_BASE } from './paths.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // pipeline-ws 工作区:toolkit 位于 plugindev/toolkit/,其上一级 plugindev 再下一级 pipeline-ws。
 const PIPELINE_WS = resolve(__dirname, '..', 'pipeline-ws');
 
 // C2:默认指向 test 实例 3081,绝不落到 dsh-api 默认 3080。
-const DEFAULT_BASE_URL = 'http://127.0.0.1:3081';
+const DEFAULT_BASE_URL = API_BASE;
 
 function usage() {
   console.error(
@@ -63,6 +67,16 @@ function extractSessionId(session) {
   return null;
 }
 
+// workspace.create 返回值里取 workspaceId,兼容 {workspace:{workspaceId}} / {workspace:{id}}
+// / {workspaceId} / {id} 四种形状(官方 RPC 返回 { workspace: { workspaceId, ... }, created })。
+function extractWorkspaceId(workspace) {
+  if (workspace?.workspace?.workspaceId) return String(workspace.workspace.workspaceId);
+  if (workspace?.workspace?.id) return String(workspace.workspace.id);
+  if (workspace?.workspaceId) return String(workspace.workspaceId);
+  if (workspace?.id) return String(workspace.id);
+  return null;
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) { usage(); process.exit(0); }
@@ -86,10 +100,24 @@ async function main() {
   }
 
   try {
-    // C2:创建会话,显式传 baseUrl。
+    // C2:先确保 pipeline-ws 工作区存在(幂等:同 canonical path 返回既有实体,不重复建),
+    //     取得 workspaceId 后创建会话并自动 attach(官方同款路径,修复 Ungrouped)。
+    const workspace = await call(
+      'workspace.create',
+      { path: PIPELINE_WS },
+      { baseUrl: args.baseUrl }
+    );
+    const workspaceId = extractWorkspaceId(workspace);
+    if (!workspaceId) {
+      console.error('workspace.create 未返回可识别的 workspaceId:', JSON.stringify(workspace));
+      process.exit(1);
+    }
+
+    // C2:创建会话(带 workspaceId → 自动 attach 到 pipeline-ws 组;cwd 由 workspace.path 派生),
+    //     显式传 baseUrl。
     const session = await call(
       'session.create',
-      { cwd: PIPELINE_WS, agentPreset: 'project-pipeline' },
+      { workspaceId, agentPreset: 'project-pipeline' },
       { baseUrl: args.baseUrl }
     );
     const sessionId = extractSessionId(session);

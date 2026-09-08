@@ -422,7 +422,15 @@ export async function scanProjects(scanRoot, deps) {
   }
   const projects = [];
   for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
+    // Windows junction(NTFS 挂载点)在 readdir(withFileTypes) 的 dirent 里是
+    // isSymbolicLink()=true / isDirectory()=false——只按 isDirectory 过滤会漏掉
+    // junction 形态的项目目录(实测 2026-09-07:项目登记后看板整体不可见)。
+    // symlink/junction 是否真是项目目录仍由下方 stat(.dsh-project) 守门:
+    // 悬空/非项目链接 stat 失败 → isDsh=false → 跳过,不拖垮整体。
+    // isSymbolicLink 防御式调用:兼容仅实现 isDirectory 的 Dirent-like stub。
+    const isDir = entry.isDirectory();
+    const isSym = typeof entry.isSymbolicLink === 'function' && entry.isSymbolicLink();
+    if (!isDir && !isSym) continue;
     const id = entry.name;
     const projectDir = join(scanRoot, id);
     const dshDir = join(projectDir, '.dsh-project');
